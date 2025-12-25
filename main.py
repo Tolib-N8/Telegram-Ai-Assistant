@@ -307,20 +307,48 @@ class TelegramAssistant:
             uid = int(event.pattern_match.group(1))
             self.blacklist.discard(uid)
             self.whitelist.add(uid)
-            self.save_data('blacklist'); self.save_data('whitelist')
-            await event.reply(f"✅ {uid} разрешен.")
+            self.save_data('blacklist')
+            self.save_data('whitelist')
+            await event.reply(f"✅ Пользователь `{uid}` разрешен и удален из ЧС.")
 
         @self.client.on(events.NewMessage(pattern=r'/block_(\d+)', from_users='me'))
         async def cmd_block(event):
             uid = int(event.pattern_match.group(1))
             self.whitelist.discard(uid)
             self.blacklist.add(uid)
-            self.save_data('blacklist'); self.save_data('whitelist')
-            await event.reply(f"🚫 {uid} в ЧС.")
+            self.save_data('blacklist')
+            self.save_data('whitelist')
+            await event.reply(f"🚫 Пользователь `{uid}` в черном списке.")
 
         @self.client.on(events.NewMessage(pattern='/stats', from_users='me'))
         async def cmd_stats(event):
-            await event.reply(f"📊 [{self.name}]\nFiles: {self.stats['blocked_files']}\nScams: {self.stats['blocked_scams']}\nTotal: {self.stats['total_unknown']}")
+            await event.reply(
+                f"📊 **Статистика [{self.name}]:**\n"
+                f"• Блокировано файлов: `{self.stats['blocked_files']}`\n"
+                f"• Выявлено скама: `{self.stats['blocked_scams']}`\n"
+                f"• Новых контактов: `{self.stats['total_unknown']}`"
+            )
+
+        @self.client.on(events.NewMessage(pattern='/whitelist', from_users='me'))
+        async def cmd_list_whitelist(event):
+            if not self.whitelist:
+                await event.reply("Белый список пуст.")
+                return
+            text = f"**Белый список [{self.name}]:**\n\n"
+            for uid in self.whitelist:
+                text += f"• `{uid}`\n"
+            text += "\nУдалить: `/unallow ID`"
+            await event.reply(text)
+
+        @self.client.on(events.NewMessage(pattern=r'/unallow (\d+)', from_users='me'))
+        async def cmd_unallow(event):
+            uid = int(event.pattern_match.group(1))
+            if uid in self.whitelist:
+                self.whitelist.remove(uid)
+                self.save_data('whitelist')
+                await event.reply(f"✅ `{uid}` удален из белого списка.")
+            else:
+                await event.reply(f"❌ `{uid}` не найден в белом списке.")
 
     async def refresh_contacts(self):
         while True:
@@ -361,6 +389,12 @@ class AccountManager:
     async def add_account(self):
         name = input("Введите имя для этого аккаунта (латиница): ").strip()
         if not name: return
+        
+        # Проверка на дубликаты
+        if any(acc['name'] == name for acc in self.config['accounts']):
+            print(f"❌ Аккаунт с именем {name} уже существует.")
+            return
+
         api_id = os.getenv('API_ID')
         api_hash = os.getenv('API_HASH')
         
@@ -368,14 +402,13 @@ class AccountManager:
         if await bot.auth():
             self.config['accounts'].append({"name": name})
             self.save_config()
-            print(f"✅ Аккаунт {name} добавлен!")
-            # Сразу запускаем
-            await bot.run()
+            print(f"✅ Аккаунт {name} успешно добавлен в список!")
+            print("Теперь вы можете запустить всех ботов из главного меню.")
+            await bot.client.disconnect()
 
     async def run_all(self):
         if not self.config['accounts']:
             print("Нет активных аккаунтов. Добавьте первый.")
-            await self.add_account()
             return
 
         api_id = os.getenv('API_ID')
@@ -386,33 +419,46 @@ class AccountManager:
             bot = TelegramAssistant(acc['name'], api_id, api_hash, self.ai_client, self.prompt)
             tasks.append(bot.run())
         
-        print(f"Запуск {len(tasks)} аккаунтов...")
-        await asyncio.gather(*tasks)
+        print(f"🚀 Запуск {len(tasks)} аккаунтов... (Ctrl+C для остановки)")
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            pass
 
 async def main_menu():
     load_dotenv()
     manager = AccountManager()
     
-    print("\n=== Telegram Multi-Assistant ===")
-    print("1. Запустить всех ботов")
-    print("2. Добавить новый аккаунт")
-    print("3. Удалить аккаунт (только из списка)")
-    print("0. Выход")
-    
-    choice = input("\nВыберите действие: ")
-    
-    if choice == '1':
-        await manager.run_all()
-    elif choice == '2':
-        await manager.add_account()
-    elif choice == '3':
-        print("Список:", [a['name'] for a in manager.config['accounts']])
-        name = input("Имя для удаления: ")
-        manager.config['accounts'] = [a for a in manager.config['accounts'] if a['name'] != name]
-        manager.save_config()
-        print("Удалено.")
-    elif choice == '0':
-        return
+    while True:
+        print("\n=== Telegram Multi-Assistant ===")
+        print("1. Запустить всех ботов")
+        print("2. Добавить новый аккаунт")
+        print("3. Удалить аккаунт (только из списка)")
+        print("0. Выход")
+        
+        try:
+            choice = input("\nВыберите действие: ").strip()
+        except EOFError:
+            break
+        
+        if choice == '1':
+            await manager.run_all()
+        elif choice == '2':
+            await manager.add_account()
+        elif choice == '3':
+            accounts = [a['name'] for a in manager.config['accounts']]
+            if not accounts:
+                print("Список пуст.")
+                continue
+            print("Список:", accounts)
+            name = input("Имя для удаления: ").strip()
+            manager.config['accounts'] = [a for a in manager.config['accounts'] if a['name'] != name]
+            manager.save_config()
+            print(f"Удалено: {name}")
+        elif choice == '0':
+            break
+        else:
+            print("Неверный выбор.")
 
 if __name__ == '__main__':
     try:
