@@ -13,6 +13,8 @@ from telethon.tl.functions.contacts import GetContactsRequest
 from google import genai
 from dotenv import load_dotenv
 import qrcode
+import argparse
+import sys
 
 # ================= Конфигурация и Константы =================
 
@@ -102,6 +104,7 @@ class TelegramAssistant:
         self.ai_client = ai_client
         self.gemini_prompt = gemini_prompt
         self.phone = phone
+        self.manager = None # Будет установлена менеджером
         
         self.logger = logging.getLogger(f"Bot_{session_name}")
         self.data_dir = ACCOUNTS_DIR / session_name
@@ -231,6 +234,9 @@ class TelegramAssistant:
             print(f"Успех: {user.first_name}")
             return True
         else:
+            if not sys.stdin.isatty():
+                self.logger.error(f"Авторизация для {self.name} не удалась: Требуется ввод телефона/кода в интерактивном режиме.")
+                return False
             phone = self.phone or input("Phone: ")
             await self.client.start(phone=phone)
             return True
@@ -350,6 +356,37 @@ class TelegramAssistant:
             else:
                 await event.reply(f"❌ `{uid}` не найден в белом списке.")
 
+        @self.client.on(events.NewMessage(pattern='/panel', from_users='me'))
+        async def cmd_panel(event):
+            if not self.manager:
+                await event.reply("Ошибка: Менеджер не инициализирован.")
+                return
+            
+            status_text = "🖥 **Панель управления Telegram Assistant**\n\n"
+            for acc in self.manager.config['accounts']:
+                status_text += f"👤 **{acc['name']}**: ✅ Работает\n"
+            
+            status_text += f"\nАктивный аккаунт: `{self.name}`\n"
+            status_text += "Доступные команды:\n"
+            status_text += "• `/stats` — общая статистика\n"
+            status_text += "• `/whitelist` — список разрешенных\n"
+            status_text += "• `/help` — список всех команд"
+            
+            await event.reply(status_text)
+
+        @self.client.on(events.NewMessage(pattern='/help', from_users='me'))
+        async def cmd_help(event):
+            help_text = (
+                "🆘 **Справка по командам:**\n\n"
+                "• `/panel` — статус всех аккаунтов\n"
+                "• `/stats` — статистика текущего бота\n"
+                "• `/whitelist` — белый список\n"
+                "• `/block_ID` — добавить ID в ЧС\n"
+                "• `/allow_ID` — добавить ID в белый список\n"
+                "• `/unallow ID` — удалить из белого списка\n"
+            )
+            await event.reply(help_text)
+
     async def refresh_contacts(self):
         while True:
             try:
@@ -417,6 +454,7 @@ class AccountManager:
         tasks = []
         for acc in self.config['accounts']:
             bot = TelegramAssistant(acc['name'], api_id, api_hash, self.ai_client, self.prompt)
+            bot.manager = self # Даем ссылку на менеджер для /panel
             tasks.append(bot.run())
         
         print(f"🚀 Запуск {len(tasks)} аккаунтов... (Ctrl+C для остановки)")
@@ -425,43 +463,32 @@ class AccountManager:
         except asyncio.CancelledError:
             pass
 
-async def main_menu():
+def parse_arguments():
     load_dotenv()
+    
+    parser = argparse.ArgumentParser(description="Telegram Multi-Assistant")
+    parser.add_argument('--daemon', action='store_true', help='Запустить всех ботов в фоновом режиме (без меню)')
+    args = parser.parse_args()
+    return args
+
+async def main():
+    load_dotenv()
+    args = parse_arguments()
     manager = AccountManager()
     
-    while True:
-        print("\n=== Telegram Multi-Assistant ===")
-        print("1. Запустить всех ботов")
-        print("2. Добавить новый аккаунт")
-        print("3. Удалить аккаунт (только из списка)")
-        print("0. Выход")
-        
-        try:
-            choice = input("\nВыберите действие: ").strip()
-        except EOFError:
-            break
-        
-        if choice == '1':
-            await manager.run_all()
-        elif choice == '2':
-            await manager.add_account()
-        elif choice == '3':
-            accounts = [a['name'] for a in manager.config['accounts']]
-            if not accounts:
-                print("Список пуст.")
-                continue
-            print("Список:", accounts)
-            name = input("Имя для удаления: ").strip()
-            manager.config['accounts'] = [a for a in manager.config['accounts'] if a['name'] != name]
-            manager.save_config()
-            print(f"Удалено: {name}")
-        elif choice == '0':
-            break
-        else:
-            print("Неверный выбор.")
+    # Если запущен в фоне (systemd) или передан флаг --daemon
+    if args.daemon or not sys.stdin.isatty():
+        logger.info("Запуск в неинтерактивном режиме...")
+        await manager.run_all()
+        return
+
+    # В main.py больше не будет меню, оно переезжает в control_panel.py
+    # Но для обратной совместимости или удобства, если запущен интерактивно без флагов:
+    print("Подсказка: Для управления аккаунтами используйте 'python control_panel.py'")
+    await manager.run_all()
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main_menu())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n🛑 Остановка...")
