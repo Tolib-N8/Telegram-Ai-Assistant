@@ -4,4 +4,7 @@ venv/
 __pycache__/
 .idea/
 .vscode/
+accounts/
+bot.log
+*.tmp
 

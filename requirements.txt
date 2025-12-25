@@ -2,3 +2,4 @@ telethon
 google-genai
 python-dotenv
 aiohttp
+qrcode
