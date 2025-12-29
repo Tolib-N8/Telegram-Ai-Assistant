@@ -50,7 +50,10 @@ def load_json_file(filename, default):
         return default
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            content = f.read().strip()
+            if not content:
+                return default
+            return json.loads(content)
     except Exception as e:
         logger.error(f"Ошибка загрузки {filename}: {e}")
         return default
@@ -115,15 +118,24 @@ class TelegramAssistant:
         self.states_file = self.data_dir / "states.json"
         self.whitelist_file = self.data_dir / "whitelist.json"
         self.blacklist_file = self.data_dir / "blacklist.json"
+        self.history_file = self.data_dir / "history.json"
+        self.status_file = self.data_dir / "status.json"
         
         # Загрузка данных
         self.stats = load_json_file(self.stats_file, {"blocked_files": 0, "blocked_scams": 0, "total_unknown": 0})
+        # Обеспечение наличия всех ключей
+        for key in ["blocked_files", "blocked_scams", "total_unknown"]:
+            if key not in self.stats:
+                self.stats[key] = 0
+        
         self.user_states = load_json_file(self.states_file, {})
         # Преобразование ключей состояний в int
         self.user_states = {int(k): v for k, v in self.user_states.items()}
         
         self.whitelist = set(load_json_file(self.whitelist_file, []))
         self.blacklist = set(load_json_file(self.blacklist_file, []))
+        self.history = load_json_file(self.history_file, {}) # {user_id: [messages]}
+        self.history = {int(k): v for k, v in self.history.items()}
         
         self.client = TelegramClient(str(self.data_dir / session_name), api_id, api_hash)
         self.rate_limiter = UserRateLimiter(limit=5, period=60)
@@ -140,36 +152,75 @@ class TelegramAssistant:
             atomic_save_json(self.whitelist_file, list(self.whitelist))
         elif key == 'blacklist':
             atomic_save_json(self.blacklist_file, list(self.blacklist))
+        elif key == 'history':
+            atomic_save_json(self.history_file, self.history)
+
+    def reset_account_data(self):
+        """Полный сброс статистики и истории для этого аккаунта (Dev मोड)"""
+        self.stats = {"blocked_files": 0, "blocked_scams": 0, "total_unknown": 0}
+        self.history = {}
+        self.user_states = {}
+        self.save_data('stats')
+        self.save_data('history')
+        self.save_data('states')
+        self.logger.info("Данные аккаунта сброшены.")
 
     def update_stats(self, key):
         self.stats[key] = self.stats.get(key, 0) + 1
         self.save_data('stats')
 
+    def add_to_history(self, user_id, role, text):
+        if user_id not in self.history:
+            self.history[user_id] = []
+        self.history[user_id].append({"role": role, "text": text, "time": time.time()})
+        # Храним последние 20 сообщений
+        if len(self.history[user_id]) > 20:
+            self.history[user_id] = self.history[user_id][-20:]
+        self.save_data('history')
+
+    def get_history_formatted(self, user_id):
+        hist = self.history.get(user_id, [])
+        formatted = ""
+        for m in hist:
+            role_name = "User" if m['role'] == 'user' else "Assistant"
+            formatted += f"{role_name}: {m['text']}\n"
+        return formatted
+
     # --- AI Логика ---
-    async def get_ai_response(self, user_message, instruction):
+    async def get_ai_response(self, user_message, instruction, user_id=None):
         if not self.ai_client: return None
         try:
+            history_str = ""
+            if user_id:
+                history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
+
             full_prompt = (
                 f"SYSTEM_INSTRUCTIONS: {self.gemini_prompt}\n"
+                f"{history_str}"
                 f"CURRENT_TASK: {instruction}\n"
                 f"MESSAGE: {user_message}\n"
                 f"Respond as defined in SYSTEM_INSTRUCTIONS."
             )
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-1.5-flash', contents=full_prompt
+                model='gemini-flash-latest', contents=full_prompt
             )
             return response.text.strip()
         except Exception as e:
             self.logger.error(f"AI Error: {e}")
             return None
 
-    async def get_ai_voice_response(self, voice_path, instruction):
+    async def get_ai_voice_response(self, voice_path, instruction, user_id=None):
         if not self.ai_client: return None
         try:
+            history_str = ""
+            if user_id:
+                history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
+
             with open(voice_path, 'rb') as f:
                 uploaded_file = await self.ai_client.aio.files.upload(file=f)
+            
             full_prompt = [
-                f"{self.gemini_prompt}\n\nTASK: {instruction}",
+                f"SYSTEM_INSTRUCTIONS: {self.gemini_prompt}\n{history_str}TASK: {instruction}",
                 uploaded_file
             ]
             response = await self.ai_client.aio.models.generate_content(
@@ -185,24 +236,34 @@ class TelegramAssistant:
         try:
             prompt = f"Analyze for scam/spam. Return JSON: {{\"is_scam\": bool, \"confidence\": int}}. Message: {text}"
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-1.5-flash', contents=prompt
+                model='gemini-flash-latest', contents=prompt
             )
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
                 data = json.loads(match.group())
                 return data.get('is_scam', False), data.get('confidence', 0)
-        except:
-            pass
+        except Exception as e:
+            self.logger.error(f"Scam Check Error: {e}")
         return False, 0
 
     # --- Авторизация ---
-    async def auth(self):
-        await self.client.connect()
+    async def auth(self, interactive=False):
+        try:
+            # Увеличиваем количество попыток подключения
+            await self.client.connect()
+        except Exception as e:
+            self.logger.error(f"Critical connection error: {e}")
+            return False
+        
         if await self.client.is_user_authorized():
             self.logger.info("Уже авторизован.")
             return True
 
-        print(f"\n--- Авторизация аккаунта: {self.name} ---")
+        if not interactive:
+            self.logger.warning(f"Аккаунт {self.session_name} не авторизован. Требуется вход через Dashboard.")
+            return False
+
+        print(f"\n--- Авторизация аккаунта: {self.session_name} ---")
         print("1. Телефон")
         print("2. QR-код")
         choice = input("Выбор: ")
@@ -234,9 +295,6 @@ class TelegramAssistant:
             print(f"Успех: {user.first_name}")
             return True
         else:
-            if not sys.stdin.isatty():
-                self.logger.error(f"Авторизация для {self.name} не удалась: Требуется ввод телефона/кода в интерактивном режиме.")
-                return False
             phone = self.phone or input("Phone: ")
             await self.client.start(phone=phone)
             return True
@@ -267,45 +325,105 @@ class TelegramAssistant:
                         return
 
             # Текст / Ссылки / Скам
-            msg_text = event.message.message
+            msg_text = event.message.message or "" # Гарантируем строку
+            
+            # Предварительная обработка медиа для истории и AI
+            if msg_text:
+                history_text = msg_text
+            elif event.message.voice:
+                history_text = "[Голосовое сообщение]"
+            elif event.message.video_note:
+                history_text = "[Видео-сообщение (кружок)]"
+            elif event.message.file:
+                history_text = f"[Файл: {event.message.file.name or 'без имени'}]"
+            else:
+                history_text = "[Медиа-сообщение]"
+
             if msg_text:
                 urls = re.findall(r'(https?://\S+)', msg_text)
+                expanded_urls = []
                 for url in urls:
-                    await expand_url(url) # Логируем раскрытие внутри если надо
+                    expanded = await expand_url(url)
+                    if expanded != url:
+                        expanded_urls.append(expanded)
                 
                 is_scam, conf = await self.is_scam_attempt(msg_text)
+                if not is_scam and expanded_urls:
+                    for e_url in expanded_urls:
+                        is_scam, conf = await self.is_scam_attempt(f"Link redirects to: {e_url}")
+                        if is_scam: break
+
                 if is_scam and conf > 70:
                     self.update_stats("blocked_scams")
+                    
+                    if conf > 80:
+                        # Агрессивная защита
+                        try:
+                            await event.delete()
+                            self.blacklist.add(sender.id)
+                            self.save_data('blacklist')
+                            await self.client.send_message('me', 
+                                f"🛡️ **Агрессивная защита сработала!**\n"
+                                f"👤 От пользователя: `{sender.id}`\n"
+                                f"📊 Уверенность AI: `{conf}%`\n"
+                                f"🚫 Сообщение удалено, пользователь заблокирован.\n"
+                                f"📝 Сообщение: `{msg_text}`"
+                            )
+                            return # Прекращаем обработку
+                        except Exception as e:
+                            self.logger.error(f"Error during aggressive scam block: {e}")
+                    
+                    # Если уверенность меньше 80%, просто уведомляем владельца
                     await self.client.send_message('me', f"🕵️‍♂️ СКАМ ({conf}%): {sender.id}\n{msg_text}")
                     if conf > 90: return
 
-            self.update_stats("total_unknown")
+            # Добавляем во входящую историю
+            self.add_to_history(sender.id, "user", history_text)
+
             state = self.user_states.get(sender.id, 0)
+            if state == 0:
+                self.update_stats("total_unknown")
 
             if state == 0:
                 async with self.client.action(sender.id, 'typing'):
                     await asyncio.sleep(2)
-                instr = "Первый контакт. Спроси кто это и зачем пишет."
+                instr = "Первый контакт. Спроси кто это и зачем пишет. Будь вежлив."
                 if event.message.voice or event.message.audio:
                     path = await event.message.download_media()
-                    reply = await self.get_ai_voice_response(path, instr)
+                    reply = await self.get_ai_voice_response(path, instr, user_id=sender.id)
                     if os.path.exists(path): os.remove(path)
                 else:
-                    reply = await self.get_ai_response(msg_text, instr)
+                    reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
                 
-                await event.reply(reply or AUTO_REPLY_TEXT)
+                final_reply = reply or AUTO_REPLY_TEXT
+                await event.reply(final_reply)
+                self.add_to_history(sender.id, "assistant", final_reply)
+                
                 self.user_states[sender.id] = 1
                 self.save_data('states')
             
             elif state == 1:
-                await self.client.send_message('me', f"❗️ Ответ от {sender.id}:\n{msg_text or '🎵 Voice'}")
+                await self.client.send_message('me', f"❗️ Ответ от {sender.id}:\n{history_text}")
                 async with self.client.action(sender.id, 'typing'):
                     await asyncio.sleep(2)
                 instr = "Пользователь ответил. Поблагодари и скажи что передашь владельцу."
-                reply = await self.get_ai_response(msg_text, instr)
-                await event.reply(reply or SECOND_REPLY_TEXT)
+                reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
+                
+                final_reply = reply or SECOND_REPLY_TEXT
+                await event.reply(final_reply)
+                self.add_to_history(sender.id, "assistant", final_reply)
+
                 self.user_states[sender.id] = 2
                 self.save_data('states')
+            
+            else:
+                async with self.client.action(sender.id, 'typing'):
+                    await asyncio.sleep(1)
+                instr = "Диалог уже был уведомлен владельцу. Просто вежливо ответь на сообщение."
+                reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
+                if reply:
+                    await event.reply(reply)
+                    self.add_to_history(sender.id, "assistant", reply)
 
         # Команды управления
         @self.client.on(events.NewMessage(pattern=r'/(?:allow|unblock)_(\d+)', from_users='me'))
@@ -330,9 +448,9 @@ class TelegramAssistant:
         async def cmd_stats(event):
             await event.reply(
                 f"📊 **Статистика [{self.name}]:**\n"
-                f"• Блокировано файлов: `{self.stats['blocked_files']}`\n"
-                f"• Выявлено скама: `{self.stats['blocked_scams']}`\n"
-                f"• Новых контактов: `{self.stats['total_unknown']}`"
+                f"• Блокировано файлов: `{self.stats.get('blocked_files', 0)}`\n"
+                f"• Выявлено скама: `{self.stats.get('blocked_scams', 0)}`\n"
+                f"• Новых контактов: `{self.stats.get('total_unknown', 0)}`"
             )
 
         @self.client.on(events.NewMessage(pattern='/whitelist', from_users='me'))
@@ -355,6 +473,12 @@ class TelegramAssistant:
                 await event.reply(f"✅ `{uid}` удален из белого списка.")
             else:
                 await event.reply(f"❌ `{uid}` не найден в белом списке.")
+
+        @self.client.on(events.NewMessage(pattern='/reset'))
+        async def reset_handler(event):
+            if not await self.is_admin(event): return
+            self.reset_account_data()
+            await event.reply("✅ История и статистика этого аккаунта очищены.")
 
         @self.client.on(events.NewMessage(pattern='/panel', from_users='me'))
         async def cmd_panel(event):
@@ -396,15 +520,52 @@ class TelegramAssistant:
             except: pass
             await asyncio.sleep(1800)
 
-    async def run(self):
-        if not await self.auth(): return
-        self.my_id = (await self.client.get_me()).id
-        res = await self.client(GetContactsRequest(hash=0))
-        self.contact_ids = {u.id for u in res.users}
-        self.register_handlers()
-        asyncio.create_task(self.refresh_contacts())
-        self.logger.info("Запущен.")
-        await self.client.run_until_disconnected()
+    async def _heartbeat(self):
+        """Фоновая задача для обновления статуса в JSON для дашборда"""
+        import time
+        while True:
+            try:
+                status_data = {
+                    "status": "online",
+                    "last_seen": time.time(),
+                    "pid": os.getpid()
+                }
+                atomic_save_json(self.status_file, status_data)
+            except Exception:
+                pass
+            await asyncio.sleep(10)
+
+    async def run(self, interactive=False):
+        # Очищаем старый статус при запуске
+        atomic_save_json(self.status_file, {"status": "starting", "last_seen": 0})
+        
+        if not await self.auth(interactive=interactive): return False
+        
+        # Запускаем heartbeat в фоне
+        heartbeat_task = asyncio.create_task(self._heartbeat())
+        
+        try:
+            self.my_id = (await self.client.get_me()).id
+            res = await self.client(GetContactsRequest(hash=0))
+            self.contact_ids = {u.id for u in res.users}
+            self.register_handlers()
+            asyncio.create_task(self.refresh_contacts())
+            self.logger.info("Запущен.")
+            await self.client.run_until_disconnected()
+            return True
+        except asyncio.CancelledError:
+            return True # Штатное завершение
+        except Exception as e:
+            self.logger.error(f"Error in bot execution: {e}")
+            return False
+        finally:
+            heartbeat_task.cancel()
+            atomic_save_json(self.status_file, {"status": "offline", "last_seen": 0})
+            try:
+                await self.client.disconnect()
+            except (Exception, RuntimeError, asyncio.CancelledError):
+                pass
+            self.logger.info("Отключен.")
 
 # ================= Менеджер Аккаунтов =================
 
@@ -419,15 +580,25 @@ class AccountManager:
         if key:
             self.ai_client = genai.Client(api_key=key)
         self.prompt = os.getenv('GEMINI_PROMPT', "Ты — ассистент.")
+        
+        # Для веб-авторизации
+        self.active_auths = {} # session_name: {client, qr, status}
+
+    def _reload_config(self):
+        self.config = load_json_file(MANAGER_CONFIG, {"accounts": []})
 
     def save_config(self):
         atomic_save_json(MANAGER_CONFIG, self.config)
 
     async def add_account(self):
+        """Интерактивный метод для консоли"""
+        if not sys.stdin.isatty():
+            print("❌ Этот метод только для интерактивного режима. Используйте веб-панель.")
+            return
+
         name = input("Введите имя для этого аккаунта (латиница): ").strip()
         if not name: return
         
-        # Проверка на дубликаты
         if any(acc['name'] == name for acc in self.config['accounts']):
             print(f"❌ Аккаунт с именем {name} уже существует.")
             return
@@ -437,29 +608,163 @@ class AccountManager:
         
         bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
         if await bot.auth():
-            self.config['accounts'].append({"name": name})
-            self.save_config()
-            print(f"✅ Аккаунт {name} успешно добавлен в список!")
-            print("Теперь вы можете запустить всех ботов из главного меню.")
+            if not any(acc['name'] == name for acc in self.config['accounts']):
+                self.config['accounts'].append({"name": name})
+                self.save_config()
+            print(f"✅ Аккаунт {name} успешно добавлен!")
             await bot.client.disconnect()
 
-    async def run_all(self):
-        if not self.config['accounts']:
-            print("Нет активных аккаунтов. Добавьте первый.")
-            return
+    async def add_account_web_start(self, name):
+        """Начало процесса QR-авторизации для веба"""
+        self._reload_config()
+        if any(acc['name'] == name for acc in self.config['accounts']):
+            return {"status": "error", "message": "Account exists"}
 
         api_id = os.getenv('API_ID')
         api_hash = os.getenv('API_HASH')
         
-        tasks = []
-        for acc in self.config['accounts']:
-            bot = TelegramAssistant(acc['name'], api_id, api_hash, self.ai_client, self.prompt)
-            bot.manager = self # Даем ссылку на менеджер для /panel
-            tasks.append(bot.run())
+        bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
+        await bot.client.connect()
         
-        print(f"🚀 Запуск {len(tasks)} аккаунтов... (Ctrl+C для остановки)")
+        # Если уже авторизован (сессия жива)
+        if await bot.client.is_user_authorized():
+            if not any(acc['name'] == name for acc in self.config['accounts']):
+                self.config['accounts'].append({"name": name})
+                self.save_config()
+            await bot.client.disconnect()
+            return {"status": "success", "message": "Already authorized"}
+
+        # Начинаем QR
+        qr = await bot.client.qr_login()
+        self.active_auths[name] = {
+            "client": bot.client,
+            "qr": qr,
+            "status": "waiting_qr",
+            "bot_instance": bot
+        }
+        return {"status": "qr", "url": qr.url}
+
+    async def add_account_web_check(self, name):
+        """Проверка статуса QR-авторизации"""
+        self._reload_config()
+        if name not in self.active_auths:
+            return {"status": "not_found"}
+        
+        auth = self.active_auths[name]
+        qr = auth['qr']
+        client = auth['client']
+        
         try:
-            await asyncio.gather(*tasks)
+            user = await qr.wait(timeout=2)
+            if user:
+                if not any(acc['name'] == name for acc in self.config['accounts']):
+                    self.config['accounts'].append({"name": name})
+                    self.save_config()
+                del self.active_auths[name]
+                return {"status": "success", "user": user.first_name}
+        except asyncio.TimeoutError:
+            return {"status": "waiting"}
+        except Exception as e:
+            from telethon.errors import SessionPasswordNeededError
+            if isinstance(e, SessionPasswordNeededError):
+                auth['status'] = 'waiting_2fa'
+                return {"status": "2fa_needed"}
+            return {"status": "error", "message": str(e)}
+        
+        return {"status": "waiting"}
+
+    async def add_account_web_2fa(self, name, password):
+        """Ввод 2FA пароля для веба"""
+        self._reload_config()
+        if name not in self.active_auths:
+            return {"status": "not_found"}
+        
+        auth = self.active_auths[name]
+        client = auth['client']
+        try:
+            user = await client.sign_in(password=password)
+            if user:
+                if not any(acc['name'] == name for acc in self.config['accounts']):
+                    self.config['accounts'].append({"name": name})
+                    self.save_config()
+                del self.active_auths[name]
+                return {"status": "success", "user": user.first_name}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    async def run_all(self):
+        """Бесконечный цикл-супервизор для управления всеми ботами"""
+        running_tasks = {} # name: task_object
+        
+        print("🚀 Менеджер запущен в режиме супервизора.")
+        
+        try:
+            while True:
+                # Перезагружаем конфиг, чтобы увидеть новые аккаунты
+                self.config = load_json_file(MANAGER_CONFIG, {"accounts": []})
+                current_names = {acc['name'] for acc in self.config['accounts']}
+                
+                # 1. Останавливаем удаленные аккаунты
+                to_stop = set(running_tasks.keys()) - current_names
+                for name in to_stop:
+                    logger.info(f"🛑 Останавливаем аккаунт: {name}")
+                    running_tasks[name].cancel()
+                    del running_tasks[name]
+
+                # 2. Запускаем новые аккаунты
+                for name in current_names:
+                    if name not in running_tasks:
+                        api_id = os.getenv('API_ID')
+                        api_hash = os.getenv('API_HASH')
+                        bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
+                        bot.manager = self
+                        
+                        logger.info(f"✨ Обнаружен новый аккаунт: {name}. Запуск...")
+                        task = asyncio.create_task(self._safe_run(bot))
+                        running_tasks[name] = task
+
+                # 3. Очистка завершенных задач
+                finished = [n for n, t in running_tasks.items() if t.done()]
+                for n in finished:
+                    try:
+                        running_tasks[n].result() # Проверка на ошибки
+                    except Exception as e:
+                        logger.error(f"❌ Критическая ошибка в боте {n}: {e}")
+                    del running_tasks[n]
+
+                if not running_tasks:
+                    # Если совсем пусто, просто ждем
+                    await asyncio.sleep(5)
+                else:
+                    await asyncio.sleep(10) # Проверяем конфиг каждые 10 секунд
+                    
+        except asyncio.CancelledError:
+            for t in running_tasks.values(): t.cancel()
+            await asyncio.gather(*running_tasks.values(), return_exceptions=True)
+
+    async def _safe_run(self, bot):
+        """Безопасный запуск одного бота с перезапуском при сбоях"""
+        retry_delay = 5
+        try:
+            while True:
+                try:
+                    success = await bot.run(interactive=False)
+                    if not success:
+                        # Если не авторизован или ошибка — ждем дольше, чтобы не спамить в БД
+                        logger.info(f"[{bot.name}] Ожидание авторизации или ошибка подключения. Пауза 60с...")
+                        await asyncio.sleep(60)
+                        continue
+                    
+                    # Если run() завершился сам (штатное отключение клиента)
+                    await asyncio.sleep(retry_delay)
+                except Exception as e:
+                    if "database is locked" in str(e):
+                        logger.warning(f"[{bot.name}] БД заблокирована другим процессом. Ждем 30с...")
+                        await asyncio.sleep(30)
+                    else:
+                        logger.error(f"[{bot.name}] Сбой: {e}. Перезапуск через {retry_delay}с...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 300)
         except asyncio.CancelledError:
             pass
 

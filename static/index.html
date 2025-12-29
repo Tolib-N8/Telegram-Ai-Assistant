@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant | Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+
+<body>
+    <header>
+        <h1>🤖 AI Assistant <span
+                style="font-size:0.8rem; vertical-align:middle; opacity:0.5; font-weight:300;">v2.0</span></h1>
+        <button class="btn btn-primary" onclick="openModal()">
+            <span>+</span> Добавить аккаунт
+        </button>
+    </header>
+
+    <div class="container">
+        <div id="accounts-grid" class="grid">
+            <!-- Динамические карточки -->
+        </div>
+
+        <div class="log-container">
+            <div class="log-header">
+                <span
+                    style="width:12px; height:12px; background:#2ecc71; border-radius:50%; display:inline-block;"></span>
+                Системные логи (в реальном времени)
+            </div>
+            <div class="log-viewer" id="log-viewer">
+                <div class="log-line">[System] Ожидание подключения к серверу...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно -->
+    <div id="addModal" class="modal">
+        <div class="modal-content">
+            <h2 style="margin-top:0;">Новый аккаунт</h2>
+            <p style="color:var(--text-dim);">Введите имя для новой сессии. Оно будет использоваться для хранения
+                файлов.</p>
+
+            <input type="text" id="account-name" class="input-fancy" placeholder="Имя сессии (например: work_bot)">
+
+            <div id="auth-actions">
+                <button class="btn btn-primary" style="width:100%; justify-content:center; padding:16px;"
+                    onclick="startAuth()">
+                    Сгенерировать QR-код
+                </button>
+            </div>
+
+            <div id="auth-status" style="margin-top: 1.5rem; font-weight:600;"></div>
+
+            <div id="qr-container" style="display: none; margin-top: 1.5rem;">
+                <div id="qr-code"></div>
+                <p style="font-size:0.9rem; margin-top:1rem;">Отсканируйте код в приложении Telegram:<br><b>Настройки >
+                        Устройства > Подключить устройство</b></p>
+            </div>
+
+            <div id="2fa-container" style="display: none; margin-top: 1.5rem;">
+                <p>Введите пароль двухфакторной аутентификации:</p>
+                <input type="password" id="tf-password" class="input-fancy" placeholder="2FA Пароль">
+                <button class="btn btn-primary" style="width:100%; justify-content:center;"
+                    onclick="submit2FA()">Подтвердить</button>
+            </div>
+
+            <button class="btn" style="margin-top: 2rem; color:var(--text-dim);" onclick="closeModal()">Отмена</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно Настроек -->
+    <div id="settingsModal" class="modal">
+        <div class="modal-content">
+            <h2 id="settings-title">Настройки аккаунта</h2>
+            <div style="text-align: left; margin-top: 2rem;">
+                <div style="margin-bottom: 1.5rem;">
+                    <label style="display:block; margin-bottom:0.5rem; color:var(--text-dim);">Системный промпт:</label>
+                    <textarea class="input-fancy" style="height: 100px; resize: none;"
+                        placeholder="Ты — полезный ассистент..."></textarea>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1.5rem;">
+                    <span>Включить AI ответы</span>
+                    <div
+                        style="width: 40px; height: 20px; background: var(--primary); border-radius: 10px; cursor: pointer;">
+                    </div>
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span>Анти-скам защита</span>
+                    <div
+                        style="width: 40px; height: 20px; background: var(--success); border-radius: 10px; cursor: pointer;">
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-top: 2rem; display: flex; gap: 10px;">
+                <button class="btn btn-primary" style="flex:1; justify-content:center;"
+                    onclick="closeSettings()">Сохранить</button>
+                <button class="btn" style="flex:1; justify-content:center;" onclick="closeSettings()">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>

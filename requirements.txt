@@ -3,3 +3,5 @@ google-genai
 python-dotenv
 aiohttp
 qrcode
+fastapi
+uvicorn
