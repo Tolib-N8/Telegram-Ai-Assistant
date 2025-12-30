@@ -5,3 +5,4 @@ aiohttp
 qrcode
 fastapi
 uvicorn
+psutil

@@ -99,6 +99,33 @@ class UserRateLimiter:
             return True
         return False
 
+class AIRateLimiter:
+    """Ограничитель запросов к Gemini API."""
+    def __init__(self, rpm_limit=15):
+        self.rpm_limit = rpm_limit
+        self.history = deque()
+        self.cooldown_until = 0
+
+    def can_request(self):
+        now = time.time()
+        if now < self.cooldown_until:
+            return False, int(self.cooldown_until - now)
+        
+        # Очистка старой истории
+        while self.history and self.history[0] < now - 60:
+            self.history.popleft()
+            
+        if len(self.history) >= self.rpm_limit:
+            return False, 60 - int(now - self.history[0])
+            
+        return True, 0
+
+    def log_request(self):
+        self.history.append(time.time())
+
+    def set_cooldown(self, seconds=60):
+        self.cooldown_until = time.time() + seconds
+
 class TelegramAssistant:
     def __init__(self, session_name, api_id, api_hash, ai_client, gemini_prompt, phone=None):
         self.name = session_name
@@ -112,6 +139,10 @@ class TelegramAssistant:
         self.logger = logging.getLogger(f"Bot_{session_name}")
         self.data_dir = ACCOUNTS_DIR / session_name
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.settings = self.load_settings()
+        self.gemini_prompt = self.settings.get("gemini_prompt", gemini_prompt)
+        self.ai_enabled = self.settings.get("ai_enabled", True)
         
         # Файлы данных
         self.stats_file = self.data_dir / "stats.json"
@@ -139,6 +170,7 @@ class TelegramAssistant:
         
         self.client = TelegramClient(str(self.data_dir / session_name), api_id, api_hash)
         self.rate_limiter = UserRateLimiter(limit=5, period=60)
+        self.ai_limiter = AIRateLimiter(rpm_limit=15)
         self.contact_ids = set()
         self.my_id = None
 
@@ -155,8 +187,18 @@ class TelegramAssistant:
         elif key == 'history':
             atomic_save_json(self.history_file, self.history)
 
+    def load_settings(self):
+        settings_file = self.data_dir / "settings.json"
+        if settings_file.exists():
+            try:
+                with open(settings_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                self.logger.error(f"Ошибка загрузки настроек для {self.name}: {e}")
+        return {}
+
     def reset_account_data(self):
-        """Полный сброс статистики и истории для этого аккаунта (Dev मोड)"""
+        """Полный сброс статистики и истории для этого аккаунта (Dev мод)"""
         self.stats = {"blocked_files": 0, "blocked_scams": 0, "total_unknown": 0}
         self.history = {}
         self.user_states = {}
@@ -187,9 +229,36 @@ class TelegramAssistant:
         return formatted
 
     # --- AI Логика ---
+    # --- AI Логика с защитой от 429 ---
+    async def _safe_ai_call(self, func, *args, **kwargs):
+        """Обертка для AI вызовов с обработкой лимитов и ретраями."""
+        if not self.ai_enabled or not self.ai_client:
+            return None
+
+        for attempt in range(3):
+            allowed, wait_time = self.ai_limiter.can_request()
+            if not allowed:
+                self.logger.warning(f"AI Rate Limit. Waiting {wait_time}s...")
+                await asyncio.sleep(min(wait_time, 5))
+                if wait_time > 10: return None # Слишком долго ждать
+
+            try:
+                self.ai_limiter.log_request()
+                return await func(*args, **kwargs)
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    backoff = (attempt + 1) * 20
+                    self.logger.warning(f"AI Quota hit. Attempt {attempt+1}, backoff {backoff}s...")
+                    self.ai_limiter.set_cooldown(backoff)
+                    await asyncio.sleep(backoff)
+                else:
+                    self.logger.error(f"AI Call failed: {e}")
+                    break
+        return None
+
     async def get_ai_response(self, user_message, instruction, user_id=None):
-        if not self.ai_client: return None
-        try:
+        async def _call():
             history_str = ""
             if user_id:
                 history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
@@ -202,16 +271,14 @@ class TelegramAssistant:
                 f"Respond as defined in SYSTEM_INSTRUCTIONS."
             )
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-flash-latest', contents=full_prompt
+                model='gemini-2.0-flash', contents=full_prompt
             )
             return response.text.strip()
-        except Exception as e:
-            self.logger.error(f"AI Error: {e}")
-            return None
+        
+        return await self._safe_ai_call(_call)
 
     async def get_ai_voice_response(self, voice_path, instruction, user_id=None):
-        if not self.ai_client: return None
-        try:
+        async def _call():
             history_str = ""
             if user_id:
                 history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
@@ -224,27 +291,32 @@ class TelegramAssistant:
                 uploaded_file
             ]
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-1.5-flash', contents=full_prompt
+                model='gemini-2.0-flash', contents=full_prompt
             )
             return response.text.strip()
-        except Exception as e:
-            self.logger.error(f"AI Voice Error: {e}")
-            return None
+
+        return await self._safe_ai_call(_call)
 
     async def is_scam_attempt(self, text):
-        if not self.ai_client: return False, 0
-        try:
+        # Быстрая проверка без ИИ
+        scam_keywords = ['crypto', 'invest', 'cashout', 'profit', 'giveaway', 'pump', 'dump']
+        if any(kw in text.lower() for kw in scam_keywords) and ('http' in text or 't.me/' in text):
+            self.logger.info("Local scam detection triggered.")
+            return True, 90
+
+        async def _call():
             prompt = f"Analyze for scam/spam. Return JSON: {{\"is_scam\": bool, \"confidence\": int}}. Message: {text}"
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-flash-latest', contents=prompt
+                model='gemini-2.0-flash', contents=prompt
             )
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
                 data = json.loads(match.group())
                 return data.get('is_scam', False), data.get('confidence', 0)
-        except Exception as e:
-            self.logger.error(f"Scam Check Error: {e}")
-        return False, 0
+            return False, 0
+            
+        res = await self._safe_ai_call(_call)
+        return res if res else (False, 0)
 
     # --- Авторизация ---
     async def auth(self, interactive=False):
@@ -252,7 +324,10 @@ class TelegramAssistant:
             # Увеличиваем количество попыток подключения
             await self.client.connect()
         except Exception as e:
-            self.logger.error(f"Critical connection error: {e}")
+            if "database is locked" in str(e):
+                self.logger.error(f"Critical connection error: database is locked. Possibly another process is using this session.")
+            else:
+                self.logger.error(f"Critical connection error: {e}")
             return False
         
         if await self.client.is_user_authorized():
@@ -260,10 +335,10 @@ class TelegramAssistant:
             return True
 
         if not interactive:
-            self.logger.warning(f"Аккаунт {self.session_name} не авторизован. Требуется вход через Dashboard.")
+            self.logger.warning(f"Аккаунт {self.name} не авторизован. Требуется вход через Dashboard.")
             return False
 
-        print(f"\n--- Авторизация аккаунта: {self.session_name} ---")
+        print(f"\n--- Авторизация аккаунта: {self.name} ---")
         print("1. Телефон")
         print("2. QR-код")
         choice = input("Выбор: ")
@@ -383,6 +458,20 @@ class TelegramAssistant:
             state = self.user_states.get(sender.id, 0)
             if state == 0:
                 self.update_stats("total_unknown")
+
+            # Проверяем, включен ли AI в настройках
+            self.settings = self.load_settings() # Reload settings to get latest
+            if not self.settings.get("ai_enabled", True):
+                # AI выключен, отправляем стандартный ответ
+                final_reply = AUTO_REPLY_TEXT
+                await event.reply(final_reply)
+                self.add_to_history(sender.id, "assistant", final_reply)
+                self.user_states[sender.id] = 1
+                self.save_data('states')
+                return # Завершаем обработку, если AI выключен
+
+            # Используем кастомный промпт, если он есть в настройках
+            current_gemini_prompt = self.settings.get("gemini_prompt", self.gemini_prompt)
 
             if state == 0:
                 async with self.client.action(sender.id, 'typing'):
@@ -556,7 +645,10 @@ class TelegramAssistant:
         except asyncio.CancelledError:
             return True # Штатное завершение
         except Exception as e:
-            self.logger.error(f"Error in bot execution: {e}")
+            if "database is locked" in str(e):
+                self.logger.error(f"Error in bot execution: database is locked. Ensure no other scripts are using this session ({self.name}).")
+            else:
+                self.logger.error(f"Error in bot execution: {e}")
             return False
         finally:
             heartbeat_task.cancel()
@@ -758,9 +850,14 @@ class AccountManager:
                     # Если run() завершился сам (штатное отключение клиента)
                     await asyncio.sleep(retry_delay)
                 except Exception as e:
-                    if "database is locked" in str(e):
-                        logger.warning(f"[{bot.name}] БД заблокирована другим процессом. Ждем 30с...")
-                        await asyncio.sleep(30)
+                    err_msg = str(e)
+                    if "database is locked" in err_msg:
+                        logger.warning(f"[{bot.name}] БД заблокирована другим процессом. Ждем 45с...")
+                        await asyncio.sleep(45)
+                    elif "Connection to" in err_msg and "failed" in err_msg:
+                         logger.warning(f"[{bot.name}] Ошибка сети. Ждем {retry_delay}с...")
+                         await asyncio.sleep(retry_delay)
+                         retry_delay = min(retry_delay * 2, 60)
                     else:
                         logger.error(f"[{bot.name}] Сбой: {e}. Перезапуск через {retry_delay}с...")
                         await asyncio.sleep(retry_delay)
