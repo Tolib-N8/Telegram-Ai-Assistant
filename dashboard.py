@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -122,6 +122,86 @@ async def auth_2fa(req: Request, username: str = Depends(authenticate)):
     result = await manager.add_account_web_2fa(name, password)
     return result
 
+@app.post("/api/accounts/auth/phone/start")
+async def auth_phone_start(req: Request, username: str = Depends(authenticate)):
+    data = await req.json()
+    name = data.get("name")
+    phone = data.get("phone")
+    if not name or not phone:
+        return JSONResponse({"status": "error", "message": "Name and Phone required"}, status_code=400)
+    
+    # Check running
+    main_proc = find_main_process()
+    if main_proc:
+        return JSONResponse({"status": "error", "message": "Stop bot first"}, status_code=400)
+        
+    result = await manager.add_account_phone_start(name, phone)
+    return result
+
+@app.post("/api/accounts/auth/phone/verify")
+async def auth_phone_verify(req: Request, username: str = Depends(authenticate)):
+    data = await req.json()
+    name = data.get("name")
+    code = data.get("code")
+    phone = data.get("phone")
+    result = await manager.add_account_phone_verify(name, code, phone)
+    return result
+
+# --- Global Config Editor ---
+@app.get("/api/config")
+async def get_global_config(username: str = Depends(authenticate)):
+    env_file = Path(".env")
+    if not env_file.exists():
+        return Response(content="", media_type="text/plain")
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            return Response(content=f.read(), media_type="text/plain")
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+@app.post("/api/config")
+async def save_global_config(req: Request, username: str = Depends(authenticate)):
+    try:
+        body = await req.body()
+        content = body.decode("utf-8")
+        env_file = Path(".env")
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"status": "success"}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+# --- AI Playground ---
+@app.post("/api/ai/test")
+async def ai_test(req: Request, username: str = Depends(authenticate)):
+    try:
+        data = await req.json()
+        prompt = data.get('prompt')
+        model_name = data.get('model', 'gemini-1.5-flash')
+        
+        # Try to use any active bot's client
+        bot = None
+        if manager.bots:
+            bot = list(manager.bots.values())[0]
+            
+        if not bot:
+            from google import genai
+            api_key = os.getenv('GEMINI_API_KEY')
+            if not api_key:
+                return {"status": "error", "message": "API Key not configured in environment"}
+            client = genai.Client(api_key=api_key)
+        else:
+            client = bot.ai_client
+
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt
+        )
+        return {"status": "success", "response": response.text}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @app.get("/api/logs")
 async def get_logs(limit: int = 100, username: str = Depends(authenticate)):
     log_file = Path("bot.log")
@@ -236,7 +316,8 @@ async def get_account_settings(name: str, username: str = Depends(authenticate))
     settings_file = acc_dir / "settings.json"
     default_settings = {
         "gemini_prompt": os.getenv("GEMINI_PROMPT", "Ты личный ассистент..."),
-        "ai_enabled": True
+        "ai_enabled": True,
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     }
     
     if settings_file.exists():
@@ -394,4 +475,4 @@ WantedBy=multi-user.target
     return {"config": config, "path": "/etc/systemd/system/tg-assistant.service"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=True)

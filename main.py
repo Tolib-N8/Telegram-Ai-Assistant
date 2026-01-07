@@ -143,6 +143,7 @@ class TelegramAssistant:
         self.settings = self.load_settings()
         self.gemini_prompt = self.settings.get("gemini_prompt", gemini_prompt)
         self.ai_enabled = self.settings.get("ai_enabled", True)
+        self.ai_model = self.settings.get("gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
         
         # Файлы данных
         self.stats_file = self.data_dir / "stats.json"
@@ -271,7 +272,7 @@ class TelegramAssistant:
                 f"Respond as defined in SYSTEM_INSTRUCTIONS."
             )
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-2.0-flash', contents=full_prompt
+                model=self.ai_model, contents=full_prompt
             )
             return response.text.strip()
         
@@ -291,7 +292,7 @@ class TelegramAssistant:
                 uploaded_file
             ]
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-2.0-flash', contents=full_prompt
+                model=self.ai_model, contents=full_prompt
             )
             return response.text.strip()
 
@@ -307,7 +308,7 @@ class TelegramAssistant:
         async def _call():
             prompt = f"Analyze for scam/spam. Return JSON: {{\"is_scam\": bool, \"confidence\": int}}. Message: {text}"
             response = await self.ai_client.aio.models.generate_content(
-                model='gemini-2.0-flash', contents=prompt
+                model=self.ai_model, contents=prompt
             )
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
@@ -774,7 +775,12 @@ class AccountManager:
         auth = self.active_auths[name]
         client = auth['client']
         try:
-            user = await client.sign_in(password=password)
+            # Check if it is a QR login or Phone login
+            if auth.get('type') == 'phone':
+                 user = await client.sign_in(password=password)
+            else:
+                 user = await client.sign_in(password=password)
+
             if user:
                 if not any(acc['name'] == name for acc in self.config['accounts']):
                     self.config['accounts'].append({"name": name})
@@ -783,6 +789,74 @@ class AccountManager:
                 return {"status": "success", "user": user.first_name}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+    async def add_account_phone_start(self, name, phone):
+        """Start phone authentication"""
+        self._reload_config()
+        if any(acc['name'] == name for acc in self.config['accounts']):
+            return {"status": "error", "message": "Account exists"}
+        
+        api_id = os.getenv('API_ID')
+        api_hash = os.getenv('API_HASH')
+        
+        bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
+        # Wait, in main.py it is self.ai_limiter globally? No, looking at file content:
+        # self.ai_clients = ai_clients
+        # self.ai_limiter = AIRateLimiter(rpm_limit=15) - wait, this is inside TelegramAssistant.
+        # AccountManager in main.py doesn't seem to pass shared_limiter in the original code I viewed earlier?
+        # Let's check init of TelegramAssistant in add_account_web_start
+        # Line 596: bot = TelegramAssistant(name, api_id, api_hash, self.ai_clients, self.prompt)
+        # It seems I need to match the signature.
+        
+        bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
+        await bot.client.connect()
+        
+        if await bot.client.is_user_authorized():
+            if not any(acc['name'] == name for acc in self.config['accounts']):
+                self.config['accounts'].append({"name": name})
+                self.save_config()
+            await bot.client.disconnect()
+            return {"status": "success", "message": "Already authorized"}
+            
+        try:
+            sent_code = await bot.client.send_code_request(phone)
+            self.active_auths[name] = {
+                "client": bot.client,
+                "phone": phone,
+                "phone_code_hash": sent_code.phone_code_hash,
+                "type": "phone",
+                "status": "waiting_code",
+                "bot_instance": bot
+            }
+            return {"status": "sent"}
+        except Exception as e:
+            await bot.client.disconnect()
+            return {"status": "error", "message": str(e)}
+
+    async def add_account_phone_verify(self, name, code, phone):
+        """Verify phone code"""
+        self._reload_config()
+        if name not in self.active_auths:
+             return {"status": "error", "message": "Session expired"}
+             
+        auth = self.active_auths[name]
+        client = auth['client']
+        phone_code_hash = auth['phone_code_hash']
+        
+        try:
+            user = await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            if user:
+                if not any(acc['name'] == name for acc in self.config['accounts']):
+                    self.config['accounts'].append({"name": name})
+                    self.save_config()
+                del self.active_auths[name]
+                return {"status": "success", "user": user.first_name}
+        except Exception as e:
+            from telethon.errors import SessionPasswordNeededError
+            if isinstance(e, SessionPasswordNeededError):
+                 return {"status": "2fa_needed"}
+            return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": "Unknown error"}
 
     async def run_all(self):
         """Бесконечный цикл-супервизор для управления всеми ботами"""

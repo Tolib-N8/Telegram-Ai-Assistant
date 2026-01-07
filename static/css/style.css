@@ -119,6 +119,7 @@ h1 {
     letter-spacing: -0.04em;
     background: linear-gradient(135deg, #fff 30%, rgba(255, 255, 255, 0.5) 100%);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -259,8 +260,65 @@ h1 {
 
 .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-    gap: 2.5rem;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 1.5rem;
+}
+
+@media (max-width: 768px) {
+    .container {
+        padding: 1.5rem 4%;
+    }
+
+    .grid {
+        grid-template-columns: 1fr;
+        gap: 1.25rem;
+    }
+
+    header {
+        padding: 1rem 4%;
+        flex-direction: column;
+        gap: 1rem;
+        align-items: flex-start;
+    }
+
+    header div[style*="display:flex"] {
+        width: 100%;
+        overflow-x: auto;
+        padding-bottom: 5px;
+        justify-content: flex-start !important;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    h1 {
+        font-size: 1.4rem;
+    }
+
+    .card {
+        padding: 1.25rem;
+        border-radius: 20px;
+    }
+
+    /* Stack management controls */
+    .card>div[style*="justify-content:space-between"] {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 1.5rem !important;
+    }
+
+    .card div[style*="display:flex"] {
+        width: 100%;
+    }
+
+    .btn span {
+        display: none;
+    }
+
+    .btn {
+        min-height: 48px;
+        padding: 0.6rem;
+        flex: 1;
+        justify-content: center;
+    }
 }
 
 /* Status Elements */
@@ -284,6 +342,8 @@ h1 {
 /* Liquid Buttons */
 .btn {
     padding: 0.75rem 1.5rem;
+    min-height: 44px;
+    /* Essential touch target */
     border-radius: 16px;
     font-weight: 600;
     font-size: 0.9rem;
@@ -633,15 +693,30 @@ h1 {
 }
 
 /* Responsive adjustments */
-@media (max-width: 600px) {
+@media (max-width: 768px) {
     .drawer {
         width: 100%;
         padding: 1.5rem;
+        right: 0;
+        border-left: none;
+        border-top: 1px solid var(--glass-border-bright);
     }
 
     .modal-content {
         padding: 1.5rem;
-        width: 95%;
+        width: 100%;
+        max-width: none;
+        margin: 0;
+        border-radius: 20px;
+        max-height: 85vh;
+    }
+
+    .stats-grid {
+        gap: 1rem !important;
+    }
+
+    .stat-val {
+        font-size: 1.25rem;
     }
 }
 

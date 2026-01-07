@@ -3,7 +3,10 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#050505">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
     <title>AI Assistant Pro | Liquid Glass Dashboard</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
@@ -19,14 +22,20 @@
         <div class="logo-container">
             <h1>AI Assistant <span
                     style="font-size:0.65rem; opacity:0.5; font-weight:500; letter-spacing:0.2em; margin-left:12px; -webkit-text-fill-color: initial; color:#fff;">PRO
-                    V2</span></h1>
+                    V0.9.9F</span></h1>
         </div>
         <div style="display:flex; gap:12px;">
             <button class="btn" onclick="showSystemd()">
-                <i data-lucide="cog"></i> Systemd
+                <i data-lucide="cog"></i> <span>Systemd</span>
+            </button>
+            <button class="btn" onclick="openConfig()" title="Конфиг">
+                <i data-lucide="settings-2"></i>
+            </button>
+            <button class="btn" onclick="openAiPlayground()" title="AI Тест">
+                <i data-lucide="bot"></i>
             </button>
             <button class="btn btn-primary" onclick="openModal()">
-                <i data-lucide="plus"></i> Добавить аккаунт
+                <i data-lucide="plus"></i> <span>Добавить аккаунт</span>
             </button>
         </div>
     </header>
@@ -52,13 +61,13 @@
                 </div>
                 <div style="display:flex; gap:15px;">
                     <button class="btn" id="btn-main-start" onclick="controlMain('start')">
-                        <i data-lucide="play"></i> Старт
+                        <i data-lucide="play"></i> <span>Старт</span>
                     </button>
                     <button class="btn" id="btn-main-restart" onclick="controlMain('restart')">
-                        <i data-lucide="refresh-cw"></i> Перезагрузка
+                        <i data-lucide="refresh-cw"></i> <span>Перезагрузка</span>
                     </button>
                     <button class="btn btn-danger" id="btn-main-stop" onclick="controlMain('stop')">
-                        <i data-lucide="power"></i> Выключить
+                        <i data-lucide="power"></i> <span>Выключить</span>
                     </button>
                 </div>
             </div>
@@ -158,9 +167,50 @@
                 сессии</label>
             <input type="text" id="account-name" class="input-fancy" placeholder="Например: assistant_main">
 
-            <div id="auth-actions" style="margin-top: 2rem;">
-                <button class="btn btn-primary" style="width:100%; height:56px; font-size:1rem;" onclick="startAuth()">
-                    Создать и авторизовать <i data-lucide="chevron-right"></i>
+
+
+            <!-- Auth Method Tabs -->
+            <div style="display:flex; gap:15px; margin-top:20px; margin-bottom:20px;">
+                <div id="tab-qr" class="auth-tab active" onclick="switchAuthTab('qr')"
+                    style="padding:10px 20px; border-radius:12px; cursor:pointer; font-size:0.9rem; font-weight:600; background:var(--primary); color:#fff; flex:1; text-align:center;">
+                    QR Код
+                </div>
+                <div id="tab-phone" class="auth-tab" onclick="switchAuthTab('phone')"
+                    style="padding:10px 20px; border-radius:12px; cursor:pointer; font-size:0.9rem; font-weight:600; background:rgba(255,255,255,0.05); color:var(--text-dim); flex:1; text-align:center;">
+                    Номер телефона
+                </div>
+            </div>
+
+            <!-- QR Auth Section -->
+            <div id="section-qr">
+                <div id="auth-actions" style="margin-top: 1rem;">
+                    <button class="btn btn-primary" style="width:100%; height:56px; font-size:1rem;"
+                        onclick="startAuth()">
+                        Создать и сканировать QR <i data-lucide="scan-line"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Phone Auth Section -->
+            <div id="section-phone" style="display:none;">
+                <label style="font-size:0.85rem; color:var(--text-dim); margin-bottom:12px; display:block;">Номер
+                    телефона</label>
+                <input type="text" id="auth-phone" class="input-fancy" placeholder="+79991234567">
+
+                <div id="phone-code-group" style="display:none; margin-top:15px;">
+                    <label style="font-size:0.85rem; color:var(--text-dim); margin-bottom:12px; display:block;">Код
+                        подтверждения</label>
+                    <input type="text" id="auth-code" class="input-fancy" placeholder="12345">
+                </div>
+
+                <button id="btn-phone-start" class="btn btn-primary"
+                    style="width:100%; height:56px; font-size:1rem; margin-top:20px;" onclick="startPhoneAuth()">
+                    Получить код <i data-lucide="send"></i>
+                </button>
+                <button id="btn-phone-verify" class="btn btn-primary"
+                    style="width:100%; height:56px; font-size:1rem; margin-top:20px; display:none;"
+                    onclick="submitPhoneCode()">
+                    Войти <i data-lucide="log-in"></i>
                 </button>
             </div>
 
@@ -207,6 +257,18 @@
                     <textarea id="settings-prompt" class="input-fancy"
                         style="height: 180px; resize: none; line-height:1.5;"
                         placeholder="Опишите поведение ассистента..."></textarea>
+                </div>
+
+                <div>
+                    <label
+                        style="display:block; margin-bottom:12px; font-size:0.85rem; font-weight:600; color:var(--text-dim);">AI
+                        Модель</label>
+                    <select id="settings-model" class="input-fancy">
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                        <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    </select>
                 </div>
 
                 <div
@@ -319,11 +381,72 @@
         </div>
     </div>
 
+    <!-- Config Modal -->
+    <div id="modal-config" class="modal">
+        <div class="modal-content">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2rem;">
+                <h3 style="margin:0; font-size:1.5rem; font-weight:800;">.env Настройки</h3>
+                <button class="btn" style="width:40px; height:40px; padding:0;" onclick="closeConfig()">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+            <textarea id="config-editor" class="input-fancy"
+                style="height:400px; font-family:'JetBrains Mono', monospace; font-size:0.85rem; line-height:1.5; tab-size:2;"
+                spellcheck="false"></textarea>
+            <div style="margin-top:2rem; display:flex; gap:12px;">
+                <button class="btn btn-primary" style="flex:1;" onclick="saveConfig()">Сохранить</button>
+                <button class="btn" style="flex:1;" onclick="closeConfig()">Отмена</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Playground Drawer -->
+    <div id="drawer-ai" class="drawer">
+        <div class="drawer-header">
+            <h3 style="margin:0; font-size:1.5rem; font-weight:800;">AI Playground</h3>
+            <button class="btn" style="width:40px; height:40px; padding:0;" onclick="closeAiPlayground()">
+                <i data-lucide="x"></i>
+            </button>
+        </div>
+        <div class="drawer-content">
+            <div>
+                <label class="stat-label">Модель</label>
+                <select id="ai-test-model" class="input-fancy" style="margin-bottom:1rem;">
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                </select>
+                <label class="stat-label">Ваш запрос (Prompt)</label>
+                <textarea id="ai-test-prompt" class="input-fancy" style="height:120px; margin-bottom:1rem;"
+                    placeholder="Введите текст для анализа..."></textarea>
+                <button class="btn btn-primary" style="width:100%;" onclick="runAiTest()">
+                    <i data-lucide="play-circle"></i> Запустить тест
+                </button>
+            </div>
+            <div id="ai-test-result-container" style="display:none; margin-top:2rem;">
+                <label class="stat-label">Результат ответа</label>
+                <div id="ai-test-result" class="log-viewer"
+                    style="height:auto; min-height:150px; background:rgba(0,0,0,0.2); border-radius:16px;"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
     <script src="/static/js/app.js"></script>
+    <!-- PWA Service Worker -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/static/sw.js')
+                    .then(reg => console.log('SW registered'))
+                    .catch(err => console.log('SW registration failed', err));
+            });
+        }
+    </script>
 </body>
 
 </html>

@@ -41,7 +41,83 @@ function showToast(message, type = 'info') {
 }
 
 // --- Data Fetching ---
+// --- Config Editor ---
+async function openConfig() {
+    document.getElementById('modal-config').style.display = 'flex';
+    try {
+        const res = await fetch('/api/config');
+        const config = await res.text();
+        document.getElementById('config-editor').value = config;
+    } catch (err) {
+        showToast("Ошибка загрузки конфига", "error");
+    }
+}
+
+function closeConfig() {
+    document.getElementById('modal-config').style.display = 'none';
+}
+
+async function saveConfig() {
+    const editor = document.getElementById('config-editor');
+    const content = editor.value;
+
+    try {
+        const res = await fetch('/api/config', {
+            method: 'POST',
+            body: content
+        });
+        const result = await res.json();
+        if (result.status === 'success') {
+            showToast("Конфиг (.env) сохранен", "success");
+            closeConfig();
+        }
+    } catch (err) {
+        showToast("Ошибка сохранения", "error");
+    }
+}
+
+// --- AI Playground ---
+function openAiPlayground() {
+    document.getElementById('drawer-ai').style.display = 'flex';
+}
+
+function closeAiPlayground() {
+    document.getElementById('drawer-ai').style.display = 'none';
+}
+
+async function runAiTest() {
+    const prompt = document.getElementById('ai-test-prompt').value;
+    const model = document.getElementById('ai-test-model').value;
+    const resultContainer = document.getElementById('ai-test-result-container');
+    const resultViewer = document.getElementById('ai-test-result');
+
+    if (!prompt) {
+        showToast("Введите текст запроса", "warning");
+        return;
+    }
+
+    resultContainer.style.display = 'block';
+    resultViewer.innerHTML = '<div class="log-line">⏳ Обработка...</div>';
+
+    try {
+        const res = await fetch('/api/ai/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt, model })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            resultViewer.innerHTML = `<div class="log-line">${data.response}</div>`;
+        } else {
+            resultViewer.innerHTML = `<div class="log-line" style="color:var(--error);">Ошибка: ${data.message}</div>`;
+        }
+    } catch (err) {
+        resultViewer.innerHTML = '<div class="log-line" style="color:var(--error);">Сетевая ошибка</div>';
+    }
+}
+
 async function fetchStatus() {
+
     try {
         const response = await fetch('/api/status');
         const data = await response.json();
@@ -300,6 +376,7 @@ async function openSettings(name) {
 
         document.getElementById('settings-prompt').value = settings.gemini_prompt;
         settingsAiEnabled = settings.ai_enabled;
+        document.getElementById('settings-model').value = settings.gemini_model || "gemini-2.0-flash";
         updateSettingsUI();
     } catch (err) {
         showToast("Не удалось загрузить настройки", "error");
@@ -313,9 +390,11 @@ async function saveSettings() {
     if (!currentSettingsAccount) return;
 
     const prompt = document.getElementById('settings-prompt').value;
+    const model = document.getElementById('settings-model').value;
     const settings = {
         gemini_prompt: prompt,
-        ai_enabled: settingsAiEnabled
+        ai_enabled: settingsAiEnabled,
+        gemini_model: model
     };
 
     try {
@@ -372,6 +451,128 @@ async function startAuth() {
     } catch (err) {
         statusDiv.innerText = "❌ Сбой сети";
         showToast("Ошибка подключения", "error");
+    }
+}
+
+let currentAuthMethod = 'qr';
+
+function switchAuthTab(method) {
+    currentAuthMethod = method;
+    const tabQr = document.getElementById('tab-qr');
+    const tabPhone = document.getElementById('tab-phone');
+    const secQr = document.getElementById('section-qr');
+    const secPhone = document.getElementById('section-phone');
+    const statusDiv = document.getElementById('auth-status');
+    const qrContainer = document.getElementById('qr-container');
+
+    // Reset UI state
+    qrContainer.style.display = 'none';
+    statusDiv.innerText = "";
+    if (authCheckInterval) clearInterval(authCheckInterval);
+
+    if (method === 'qr') {
+        tabQr.classList.add('active');
+        tabQr.style.background = 'var(--primary)';
+        tabQr.style.color = '#fff';
+
+        tabPhone.classList.remove('active');
+        tabPhone.style.background = 'rgba(255,255,255,0.05)';
+        tabPhone.style.color = 'var(--text-dim)';
+
+        secQr.style.display = 'block';
+        secPhone.style.display = 'none';
+        document.getElementById('auth-actions').style.display = 'block';
+    } else {
+        tabPhone.classList.add('active');
+        tabPhone.style.background = 'var(--primary)';
+        tabPhone.style.color = '#fff';
+
+        tabQr.classList.remove('active');
+        tabQr.style.background = 'rgba(255,255,255,0.05)';
+        tabQr.style.color = 'var(--text-dim)';
+
+        secPhone.style.display = 'block';
+        secQr.style.display = 'none';
+
+        // Reset phone form
+        document.getElementById('phone-code-group').style.display = 'none';
+        document.getElementById('btn-phone-start').style.display = 'block';
+        document.getElementById('btn-phone-verify').style.display = 'none';
+    }
+}
+
+async function startPhoneAuth() {
+    const name = document.getElementById('account-name').value.trim();
+    const phone = document.getElementById('auth-phone').value.trim();
+
+    if (!name) return showToast("Введите имя аккаунта", "warning");
+    if (!phone) return showToast("Введите номер телефона", "warning");
+
+    currentAuthName = name;
+
+    const btn = document.getElementById('btn-phone-start');
+    const oldText = btn.innerHTML;
+    btn.innerText = "Отправка...";
+    btn.disabled = true;
+
+    try {
+        const res = await fetch('/api/accounts/auth/phone/start', {
+            method: 'POST',
+            body: JSON.stringify({ name, phone })
+        });
+        const data = await res.json();
+
+        if (data.status === 'sent') {
+            showToast("Код отправлен в Telegram", "success");
+            document.getElementById('phone-code-group').style.display = 'block';
+            document.getElementById('btn-phone-start').style.display = 'none';
+            document.getElementById('btn-phone-verify').style.display = 'block';
+        } else if (data.status === 'error') {
+            showToast(data.message, "error");
+        } else {
+            showToast("Неизвестный статус: " + data.status, "warning");
+        }
+    } catch (e) {
+        showToast("Ошибка сети", "error");
+    } finally {
+        btn.innerHTML = oldText;
+        btn.disabled = false;
+    }
+}
+
+async function submitPhoneCode() {
+    const code = document.getElementById('auth-code').value.trim();
+    const phone = document.getElementById('auth-phone').value.trim();
+
+    if (!code) return showToast("Введите код", "warning");
+
+    const btn = document.getElementById('btn-phone-verify');
+    btn.innerText = "Проверка...";
+    btn.disabled = true;
+
+    try {
+        const res = await fetch('/api/accounts/auth/phone/verify', {
+            method: 'POST',
+            body: JSON.stringify({ name: currentAuthName, code, phone })
+        });
+        const data = await res.json();
+
+        if (data.status === 'success') {
+            showToast(`Успешно! Привет, ${data.user}`, "success");
+            setTimeout(() => { location.reload(); }, 1500);
+        } else if (data.status === '2fa_needed') {
+            // Reuse existing 2FA UI but hide phone section
+            document.getElementById('section-phone').style.display = 'none';
+            document.getElementById('2fa-container').style.display = 'block';
+            showToast("Введите пароль 2FA", "info");
+        } else {
+            showToast(data.message, "error");
+        }
+    } catch (e) {
+        showToast("Ошибка сети", "error");
+    } finally {
+        btn.innerText = "Войти";
+        btn.disabled = false;
     }
 }
 
@@ -437,10 +638,19 @@ async function submit2FA() {
 
 function openModal() {
     document.getElementById('addModal').style.display = 'flex';
-    document.getElementById('auth-actions').style.display = 'block';
-    document.getElementById('qr-container').style.display = 'none';
-    document.getElementById('2fa-container').style.display = 'none';
     document.getElementById('auth-status').innerText = "";
+
+    // Reset inputs
+    document.getElementById('account-name').value = "";
+    document.getElementById('auth-phone').value = "";
+    document.getElementById('auth-code').value = "";
+
+    // Default to QR tab
+    switchAuthTab('qr');
+
+    // Hide 2FA
+    document.getElementById('2fa-container').style.display = 'none';
+
     updateIcons();
 }
 function closeModal() {
