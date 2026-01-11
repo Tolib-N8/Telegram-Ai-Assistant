@@ -29,7 +29,8 @@ load_dotenv()
 # Импортируем существующую логику
 from main import AccountManager, MANAGER_CONFIG, ACCOUNTS_DIR, load_json_file
 
-app = FastAPI(title="Telegram Assistant Dashboard")
+app = FastAPI(title="Telegram Assistant Dashboard", version="0.9.9G")
+VERSION = "v0.9.9G"
 
 # Сессии и Безопасность
 SECRET_KEY = os.getenv("DASHBOARD_SECRET", secrets.token_urlsafe(32))
