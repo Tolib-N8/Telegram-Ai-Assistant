@@ -6,3 +6,4 @@ qrcode
 fastapi
 uvicorn
 psutil
+webauthn

@@ -4,6 +4,7 @@ import json
 import re
 import logging
 import time
+import datetime
 import aiohttp
 from pathlib import Path
 from collections import deque
@@ -143,7 +144,7 @@ class TelegramAssistant:
         self.settings = self.load_settings()
         self.gemini_prompt = self.settings.get("gemini_prompt", gemini_prompt)
         self.ai_enabled = self.settings.get("ai_enabled", True)
-        self.ai_model = self.settings.get("gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+        self.ai_model = self.settings.get("gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
         
         # Файлы данных
         self.stats_file = self.data_dir / "stats.json"
@@ -152,6 +153,7 @@ class TelegramAssistant:
         self.blacklist_file = self.data_dir / "blacklist.json"
         self.history_file = self.data_dir / "history.json"
         self.status_file = self.data_dir / "status.json"
+        self.token_file = self.data_dir / "token_usage.json"
         
         # Загрузка данных
         self.stats = load_json_file(self.stats_file, {"blocked_files": 0, "blocked_scams": 0, "total_unknown": 0})
@@ -231,6 +233,25 @@ class TelegramAssistant:
 
     # --- AI Логика ---
     # --- AI Логика с защитой от 429 ---
+    def _report_token_usage(self, usage):
+        """Запись использования токенов Gemini."""
+        if not usage: return
+        
+        try:
+            date_str = datetime.date.today().isoformat()
+            data = load_json_file(self.token_file, {})
+            
+            day_data = data.get(date_str, {"input": 0, "output": 0})
+            day_data["input"] += usage.prompt_token_count
+            day_data["output"] += usage.candidates_token_count
+            
+            data[date_str] = day_data
+            
+            with open(self.token_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            self.logger.error(f"Error reporting token usage: {e}")
+
     async def _safe_ai_call(self, func, *args, **kwargs):
         """Обертка для AI вызовов с обработкой лимитов и ретраями."""
         if not self.ai_enabled or not self.ai_client:
@@ -274,6 +295,7 @@ class TelegramAssistant:
             response = await self.ai_client.aio.models.generate_content(
                 model=self.ai_model, contents=full_prompt
             )
+            self._report_token_usage(response.usage_metadata)
             return response.text.strip()
         
         return await self._safe_ai_call(_call)
@@ -294,6 +316,7 @@ class TelegramAssistant:
             response = await self.ai_client.aio.models.generate_content(
                 model=self.ai_model, contents=full_prompt
             )
+            self._report_token_usage(response.usage_metadata)
             return response.text.strip()
 
         return await self._safe_ai_call(_call)
@@ -310,6 +333,7 @@ class TelegramAssistant:
             response = await self.ai_client.aio.models.generate_content(
                 model=self.ai_model, contents=prompt
             )
+            self._report_token_usage(response.usage_metadata)
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
                 data = json.loads(match.group())
@@ -601,6 +625,11 @@ class TelegramAssistant:
             )
             await event.reply(help_text)
 
+    async def is_admin(self, event):
+        """Проверка, является ли отправитель владельцем аккаунта."""
+        sender_id = event.sender_id
+        return sender_id == self.my_id or sender_id == 'me'
+
     async def refresh_contacts(self):
         while True:
             try:
@@ -676,6 +705,9 @@ class AccountManager:
         
         # Для веб-авторизации
         self.active_auths = {} # session_name: {client, qr, status}
+        
+        # Активные экземпляры ботов
+        self.bots = {} # session_name: TelegramAssistant
 
     def _reload_config(self):
         self.config = load_json_file(MANAGER_CONFIG, {"accounts": []})
@@ -876,6 +908,7 @@ class AccountManager:
                     logger.info(f"🛑 Останавливаем аккаунт: {name}")
                     running_tasks[name].cancel()
                     del running_tasks[name]
+                    if name in self.bots: del self.bots[name]
 
                 # 2. Запускаем новые аккаунты
                 for name in current_names:
@@ -884,6 +917,7 @@ class AccountManager:
                         api_hash = os.getenv('API_HASH')
                         bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
                         bot.manager = self
+                        self.bots[name] = bot
                         
                         logger.info(f"✨ Обнаружен новый аккаунт: {name}. Запуск...")
                         task = asyncio.create_task(self._safe_run(bot))
@@ -897,6 +931,7 @@ class AccountManager:
                     except Exception as e:
                         logger.error(f"❌ Критическая ошибка в боте {n}: {e}")
                     del running_tasks[n]
+                    if n in self.bots: del self.bots[n]
 
                 if not running_tasks:
                     # Если совсем пусто, просто ждем

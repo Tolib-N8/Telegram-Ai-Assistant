@@ -31,8 +31,11 @@
             <button class="btn" onclick="openConfig()" title="Конфиг">
                 <i data-lucide="settings-2"></i>
             </button>
-            <button class="btn" onclick="openAiPlayground()" title="AI Тест">
-                <i data-lucide="bot"></i>
+            <button class="btn" onclick="registerPasskey()" title="Регистрация Passkey">
+                <i data-lucide="fingerprint"></i>
+            </button>
+            <button class="btn" onclick="logout()" title="Выйти">
+                <i data-lucide="log-out"></i>
             </button>
             <button class="btn btn-primary" onclick="openModal()">
                 <i data-lucide="plus"></i> <span>Добавить аккаунт</span>
@@ -86,6 +89,13 @@
                         style="position:absolute; top:0; left:0; font-size:0.7rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.1em;">
                         Память (ОЗУ)</div>
                     <canvas id="ramChart"></canvas>
+                </div>
+                <!-- Token Stats -->
+                <div style="height: 140px; position: relative;">
+                    <div
+                        style="position:absolute; top:0; left:0; font-size:0.7rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.1em;">
+                        Использование Токенов (AI)</div>
+                    <canvas id="tokenChart"></canvas>
                 </div>
             </div>
         </div>
@@ -435,6 +445,8 @@
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/@github/webauthn-json@latest/dist/browser-global/webauthn-json.browser-global.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
     <script src="/static/js/app.js"></script>
     <!-- PWA Service Worker -->

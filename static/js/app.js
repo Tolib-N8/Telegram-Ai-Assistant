@@ -127,7 +127,46 @@ async function fetchStatus() {
     }
 }
 
+// --- WebSocket Log Logic ---
+let logWs = null;
+
+function initLogWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+
+    logWs = new WebSocket(wsUrl);
+
+    logWs.onopen = () => {
+        console.log("Log WebSocket connected");
+        allLogs = []; // Clear local logs to avoid duplicates when reconnecting
+    };
+
+    logWs.onmessage = (event) => {
+        const line = event.data;
+        if (line) {
+            allLogs.push(line);
+            // Cap local logs for memory
+            if (allLogs.length > 1000) {
+                allLogs = allLogs.slice(-1000);
+            }
+            applyLogFiltering();
+        }
+    };
+
+    logWs.onclose = () => {
+        console.log("Log WebSocket disconnected, retrying in 3s...");
+        setTimeout(initLogWebSocket, 3000);
+    };
+
+    logWs.onerror = (err) => {
+        console.error("Log WebSocket error", err);
+        logWs.close();
+    };
+}
+
 async function fetchLogs() {
+    // This is now a fallback or initial fetch if needed, 
+    // but with the current logic we use WS from the start.
     try {
         const response = await fetch('/api/logs?limit=500');
         const data = await response.json();
@@ -809,7 +848,7 @@ async function controlMain(action) {
 }
 
 // --- Charts ---
-let cpuChart, ramChart;
+let cpuChart, ramChart, tokenChart;
 const MAX_DATA_POINTS = 30;
 
 function initCharts() {
@@ -848,6 +887,46 @@ function initCharts() {
 
     cpuChart = new Chart(cpuCtx, chartOptions('#8B5CF6'));
     ramChart = new Chart(ramCtx, chartOptions('#3B82F6'));
+
+    const tokenCtx = document.getElementById('tokenChart').getContext('2d');
+    tokenChart = new Chart(tokenCtx, {
+        type: 'bar',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'Input',
+                    data: [],
+                    backgroundColor: '#10B981',
+                    borderRadius: 4
+                },
+                {
+                    label: 'Output',
+                    data: [],
+                    backgroundColor: '#F59E0B',
+                    borderRadius: 4
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: {
+                    stacked: true,
+                    grid: { display: false },
+                    ticks: { display: false }
+                },
+                y: {
+                    stacked: true,
+                    grid: { color: 'rgba(255,255,255,0.03)' },
+                    ticks: { display: false }
+                }
+            },
+            animation: { duration: 500 }
+        }
+    });
 }
 
 async function updateSystemStats() {
@@ -859,6 +938,18 @@ async function updateSystemStats() {
     } catch (err) { }
 }
 
+async function updateTokenStats() {
+    try {
+        const response = await fetch('/api/ai/token-stats');
+        const data = await response.json();
+
+        tokenChart.data.labels = data.dates;
+        tokenChart.data.datasets[0].data = data.input;
+        tokenChart.data.datasets[1].data = data.output;
+        tokenChart.update();
+    } catch (err) { }
+}
+
 function updateChart(chart, value) {
     chart.data.datasets[0].data.push(value);
     chart.data.datasets[0].data.shift();
@@ -867,19 +958,84 @@ function updateChart(chart, value) {
 
 // --- Initialization ---
 setInterval(fetchStatus, 3000);
-setInterval(fetchLogs, 2000);
+// setInterval(fetchLogs, 2000); // Replaced by WebSocket
 setInterval(fetchMainStatus, 4000);
 setInterval(updateSystemStats, 2000);
+setInterval(updateTokenStats, 10000); // Tokens update less frequently
+
+const getWebAuthnHelper = () => {
+    return window.webauthnJSON || window.WebAuthnJSON || (typeof webauthnJSON !== 'undefined' ? webauthnJSON : (typeof WebAuthnJSON !== 'undefined' ? WebAuthnJSON : null));
+};
+
+async function registerPasskey() {
+    const helper = getWebAuthnHelper();
+    if (!helper) {
+        showToast("Ошибка: библиотека WebAuthn не загружена", "error");
+        return;
+    }
+
+    try {
+        const optRes = await fetch('/api/auth/register/options');
+        if (optRes.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        const options = await optRes.json();
+        const credential = await helper.create({ publicKey: options });
+
+        const verRes = await fetch('/api/auth/register/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(credential)
+        });
+
+        if (verRes.ok) {
+            showToast("Passkey успешно зарегистрирован!", "success");
+        } else {
+            const err = await verRes.json();
+            showToast("Ошибка регистрации: " + err.message, "error");
+        }
+    } catch (err) {
+        console.error(err);
+        if (err.name !== 'NotAllowedError') {
+            showToast("Ошибка при регистрации Passkey", "error");
+        }
+    }
+}
+
+async function logout() {
+    try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+        window.location.href = '/login';
+    } catch (err) {
+        window.location.href = '/login';
+    }
+}
+
+// Global fetch utility to handle 401
+async function apiFetch(url, options = {}) {
+    const res = await fetch(url, options);
+    if (res.status === 401) {
+        window.location.href = '/login';
+        throw new Error("Unauthorized");
+    }
+    return res;
+}
 
 // Single start
 (function init() {
     fetchStatus();
-    fetchLogs();
+    initLogWebSocket();
     fetchMainStatus();
     initCharts();
     updateSystemStats();
+    updateTokenStats();
     updateIcons();
 
-    // Welcome Toast
+    // Check auth on start
+    fetch('/api/status').then(res => {
+        if (res.status === 401) window.location.href = '/login';
+    });
+
     setTimeout(() => showToast("Панель управления готова", "success"), 500);
 })();

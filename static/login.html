@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход | Telegram Assistant Pro</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/@github/webauthn-json@latest/dist/browser-global/webauthn-json.browser-global.min.js"></script>
+    <style>
+        :root {
+            --primary: #8B5CF6;
+            --primary-hover: #7C3AED;
+            --bg: #030712;
+            --card-bg: rgba(17, 24, 39, 0.7);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --text: #F9FAFB;
+            --text-dim: #9CA3AF;
+            --error: #EF4444;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Анимированный фон (Liquid Glass) */
+        .bg-blob {
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(139, 92, 246, 0.15) 0%, rgba(139, 92, 246, 0) 70%);
+            border-radius: 50%;
+            z-index: -1;
+            filter: blur(60px);
+            animation: move 20s infinite alternate;
+        }
+
+        @keyframes move {
+            from {
+                transform: translate(-50%, -50%);
+            }
+
+            to {
+                transform: translate(50%, 50%);
+            }
+        }
+
+        .login-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            border: 1px solid var(--glass-border);
+            padding: 3rem;
+            border-radius: 24px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            animation: fadeIn 0.8s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 800;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.04em;
+            text-align: center;
+        }
+
+        p.subtitle {
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .input-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            color: white;
+            font-family: inherit;
+            box-sizing: border-box;
+            transition: all 0.3s ease;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--primary);
+            background: rgba(255, 255, 255, 0.06);
+            box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.1);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px;
+            background: var(--primary);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .btn:hover {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(139, 92, 246, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            margin-top: 1rem;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            box-shadow: none;
+        }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            margin: 2rem 0;
+            color: var(--text-dim);
+            font-size: 0.8rem;
+        }
+
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid var(--glass-border);
+        }
+
+        .divider::before {
+            margin-right: .5em;
+        }
+
+        .divider::after {
+            margin-left: .5em;
+        }
+
+        .error-msg {
+            color: var(--error);
+            font-size: 0.85rem;
+            margin-top: 1rem;
+            text-align: center;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="bg-blob" style="top: 20%; left: 30%;"></div>
+    <div class="bg-blob" style="bottom: 20%; right: 30%; animation-delay: -5s;"></div>
+
+    <div class="login-card">
+        <h1>С возвращением</h1>
+        <p class="subtitle">Управляйте своим ИИ-ассистентом</p>
+
+        <form id="loginForm">
+            <div class="input-group">
+                <label>Имя пользователя</label>
+                <input type="text" id="username" placeholder="Ваш логин" required>
+            </div>
+            <div class="input-group">
+                <label>Пароль</label>
+                <input type="password" id="password" placeholder="••••••••" required>
+            </div>
+            <button type="submit" class="btn">
+                Войти в панель <i data-lucide="arrow-right"></i>
+            </button>
+        </form>
+
+        <div class="divider">или</div>
+
+        <button id="passkeyLogin" class="btn btn-secondary">
+            Войти с Passkey <i data-lucide="fingerprint"></i>
+        </button>
+
+        <div id="error" class="error-msg">Неверный логин или пароль</div>
+    </div>
+
+    <script>
+        lucide.createIcons();
+
+        const form = document.getElementById('loginForm');
+        const passkeyBtn = document.getElementById('passkeyLogin');
+        const errorDiv = document.getElementById('error');
+
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            errorDiv.style.display = 'none';
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                if (res.ok) {
+                    window.location.href = '/';
+                } else {
+                    errorDiv.innerText = "Неверный логин или пароль";
+                    errorDiv.style.display = 'block';
+                }
+            } catch (err) {
+                errorDiv.innerText = "Ошибка сервера при входе";
+                errorDiv.style.display = 'block';
+            }
+        };
+
+        passkeyBtn.onclick = async () => {
+            errorDiv.style.display = 'none';
+            const username = document.getElementById('username').value;
+            if (!username) {
+                errorDiv.innerText = "Введите имя пользователя для входа через Passkey";
+                errorDiv.style.display = 'block';
+                return;
+            }
+
+            try {
+                // Get options
+                const optRes = await fetch('/api/auth/login/options', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username })
+                });
+
+                if (!optRes.ok) {
+                    const errData = await optRes.json();
+                    errorDiv.innerText = errData.message || "У этого пользователя нет Passkeys";
+                    errorDiv.style.display = 'block';
+                    return;
+                }
+
+                const options = await optRes.json();
+
+                // Native authentication call (using webauthn-json helper)
+                const credential = await webauthnJSON.get({ publicKey: options });
+
+                // Verify
+                const verRes = await fetch('/api/auth/login/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, ...credential })
+                });
+
+                if (verRes.ok) {
+                    window.location.href = '/';
+                } else {
+                    errorDiv.innerText = "Ошибка верификации Passkey";
+                    errorDiv.style.display = 'block';
+                }
+            } catch (err) {
+                console.error(err);
+                if (err.name !== 'NotAllowedError') { // Common if user cancels
+                    errorDiv.innerText = "Ошибка при использовании Passkey";
+                    errorDiv.style.display = 'block';
+                }
+            }
+        };
+    </script>
+</body>
+
+</html>

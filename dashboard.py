@@ -1,9 +1,10 @@
 import os
 import asyncio
+import aiohttp
 import json
 import logging
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -16,6 +17,11 @@ import subprocess
 import sys
 import time
 import signal
+import datetime
+from itsdangerous import URLSafeSerializer
+from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, APIKeyCookie
+import auth_utils
 
 # Загружаем переменные окружения в начале
 load_dotenv()
@@ -25,23 +31,32 @@ from main import AccountManager, MANAGER_CONFIG, ACCOUNTS_DIR, load_json_file
 
 app = FastAPI(title="Telegram Assistant Dashboard")
 
-# Настройка безопасности
-security = HTTPBasic()
+# Сессии и Безопасность
+SECRET_KEY = os.getenv("DASHBOARD_SECRET", secrets.token_urlsafe(32))
+serializer = URLSafeSerializer(SECRET_KEY)
+session_cookie = APIKeyCookie(name="session", auto_error=False)
 
-def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
-    correct_username = os.getenv("DASHBOARD_USER", "admin")
-    correct_password = os.getenv("DASHBOARD_PASSWORD", "password123")
-    
-    is_correct_username = secrets.compare_digest(credentials.username, correct_username)
-    is_correct_password = secrets.compare_digest(credentials.password, correct_password)
-    
-    if not (is_correct_username and is_correct_password):
-        raise HTTPException(
-            status_code=401,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+# Глобальное хранилище для вызовов WebAuthn (в памяти, так как процесс один)
+webauthn_challenges = {} # session_id: challenge
+
+def get_session_user(session: str = Depends(session_cookie)):
+    if not session:
+        return None
+    try:
+        data = serializer.loads(session)
+        return data.get("user")
+    except:
+        return None
+
+def authenticate(user: str = Depends(get_session_user)):
+    if not user:
+        # Для API возвращаем 401, для страниц можно редирект, 
+        # но FastAPI Depends лучше работает с исключениями
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+async def optional_authenticate(user: str = Depends(get_session_user)):
+    return user
 
 # Монтируем статику (саму папку статики не защищаем, чтобы CSS/JS грузились до логина? 
 # Нет, лучше защитить всё приложение)
@@ -51,13 +66,135 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 manager = AccountManager()
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(user: str = Depends(get_session_user)):
+    if user:
+        return RedirectResponse(url="/")
+    with open("static/login.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+@app.post("/api/auth/login")
+async def api_login(req: Request):
+    data = await req.json()
+    username = data.get("username")
+    password = data.get("password")
+    
+    correct_username = os.getenv("DASHBOARD_USER", "admin")
+    correct_password = os.getenv("DASHBOARD_PASSWORD", "08908090") # default from .env
+    
+    if username == correct_username and password == correct_password:
+        token = serializer.dumps({"user": username, "ts": time.time()})
+        response = JSONResponse({"status": "success"})
+        response.set_cookie(key="session", value=token, httponly=True, samesite="lax")
+        return response
+    
+    return JSONResponse({"status": "error", "message": "Invalid credentials"}, status_code=401)
+
+@app.post("/api/auth/logout")
+async def api_logout():
+    response = JSONResponse({"status": "success"})
+    response.delete_cookie("session")
+    return response
+
 @app.get("/", response_class=HTMLResponse)
-async def get_dashboard(username: str = Depends(authenticate)):
+async def get_dashboard(user: str = Depends(get_session_user)):
+    if not user:
+        return RedirectResponse(url="/login")
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
+@app.get("/api/auth/register/options")
+async def register_options(request: Request, user: str = Depends(authenticate)):
+    # derive origin and rp_id from the incoming request so origin matches
+    origin = str(request.base_url).rstrip('/')
+    rp_id = request.url.hostname or os.getenv('RP_ID', 'localhost')
+
+    options = auth_utils.get_webauthn_registration_options(user, user, rp_id=rp_id)
+    # Convert to JSON-friendly structure and store challenge (string) in memory
+    options_json = auth_utils.options_to_json(options)
+    # options_to_json may return a JSON string or a dict depending on library version
+    if isinstance(options_json, str):
+        try:
+            options_json = json.loads(options_json)
+        except Exception:
+            pass
+
+    webauthn_challenges[user] = {
+        'challenge': options_json.get('challenge') if isinstance(options_json, dict) else None,
+        'expected_origin': origin,
+        'expected_rp_id': rp_id,
+    }
+    return JSONResponse(options_json)
+
+@app.post("/api/auth/register/verify")
+async def register_verify(req: Request, user: str = Depends(authenticate)):
+    data = await req.json()
+    stored = webauthn_challenges.get(user)
+    if not stored:
+        return JSONResponse({"status": "error", "message": "Challenge not found"}, status_code=400)
+
+    # Attach expected values so verifier can use correct origin and rp_id
+    if isinstance(data, dict):
+        data['_expected_origin'] = stored.get('expected_origin')
+        data['_expected_rp_id'] = stored.get('expected_rp_id')
+
+    success = auth_utils.verify_webauthn_registration(user, data, stored.get('challenge'))
+    if success:
+        return {"status": "success"}
+    return JSONResponse({"status": "error", "message": "Verification failed"}, status_code=400)
+
+@app.post("/api/auth/login/options")
+async def login_options(request: Request):
+    data = await request.json()
+    username = data.get("username")
+    if not username:
+        return JSONResponse({"status": "error", "message": "Username required"}, status_code=400)
+
+    rp_id = request.url.hostname or os.getenv('RP_ID', 'localhost')
+    options = auth_utils.get_webauthn_authentication_options(username, rp_id=rp_id)
+    if not options:
+        return JSONResponse({"status": "error", "message": "No passkeys found for this user"}, status_code=404)
+
+    # Store challenge by username for login (use JSON form to ensure string)
+    options_json = auth_utils.options_to_json(options)
+    if isinstance(options_json, str):
+        try:
+            options_json = json.loads(options_json)
+        except Exception:
+            pass
+
+    origin = str(request.base_url).rstrip('/')
+    webauthn_challenges[f"login_{username}"] = {
+        'challenge': options_json.get('challenge') if isinstance(options_json, dict) else None,
+        'expected_origin': origin,
+        'expected_rp_id': rp_id,
+    }
+    return JSONResponse(options_json)
+
+@app.post("/api/auth/login/verify")
+async def login_verify(req: Request):
+    data = await req.json()
+    username = data.get("username")
+    stored = webauthn_challenges.get(f"login_{username}")
+
+    if not stored:
+        return JSONResponse({"status": "error", "message": "Challenge not found"}, status_code=400)
+
+    if isinstance(data, dict):
+        data['_expected_origin'] = stored.get('expected_origin')
+        data['_expected_rp_id'] = stored.get('expected_rp_id')
+
+    success = auth_utils.verify_webauthn_authentication(username, data, stored.get('challenge'))
+    if success:
+        token = serializer.dumps({"user": username, "ts": time.time()})
+        response = JSONResponse({"status": "success"})
+        response.set_cookie(key="session", value=token, httponly=True, samesite="lax")
+        return response
+
+    return JSONResponse({"status": "error", "message": "Verification failed"}, status_code=401)
+
 @app.get("/api/status")
-async def get_status(username: str = Depends(authenticate)):
+async def get_status(user: str = Depends(authenticate)):
     import time
     accounts = []
     config = load_json_file(MANAGER_CONFIG, {"accounts": []})
@@ -197,6 +334,8 @@ async def ai_test(req: Request, username: str = Depends(authenticate)):
             model=model_name,
             contents=prompt
         )
+        if bot:
+            bot._report_token_usage(response.usage_metadata)
         return {"status": "success", "response": response.text}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -213,13 +352,53 @@ async def get_logs(limit: int = 100, username: str = Depends(authenticate)):
     
     try:
         with open(log_file, "r", encoding="utf-8") as f:
-            # Efficiently read last N lines
-            # For simplicity with relatively small log files, we can use readlines()
-            # If the file becomes huge, we'd need a seek-based approach.
             lines = f.readlines()
             return {"logs": [l.strip() for l in lines[-limit:]]}
     except Exception as e:
         return {"logs": [f"Error reading logs: {e}"]}
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    # For simplicity, we don't authenticate WS in this basic version, 
+    # but in production, we should check a token.
+    await websocket.accept()
+    log_file = Path("bot.log")
+    
+    if not log_file.exists():
+        await websocket.send_text("Log file not found.")
+        await websocket.close()
+        return
+
+    try:
+        # Start by sending last 50 lines
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            for line in lines[-50:]:
+                await websocket.send_text(line.strip())
+        
+        # Now tail the file
+        last_size = log_file.stat().st_size
+        while True:
+            await asyncio.sleep(0.5)
+            current_size = log_file.stat().st_size
+            if current_size > last_size:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    f.seek(last_size)
+                    new_data = f.read()
+                    if new_data:
+                        for line in new_data.splitlines():
+                            if line.strip():
+                                await websocket.send_text(line.strip())
+                last_size = current_size
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logging.error(f"WebSocket error: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
 
 @app.get("/api/logs/export")
 async def export_logs(username: str = Depends(authenticate)):
@@ -243,6 +422,34 @@ async def clear_logs(username: str = Depends(authenticate)):
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.get("/api/ai/token-stats")
+async def get_token_stats(username: str = Depends(authenticate)):
+    """Агрегация статистики использования токенов со всех аккаунтов."""
+    aggregated = {} # date: {input, output}
+    
+    try:
+        if ACCOUNTS_DIR.exists():
+            for acc_dir in ACCOUNTS_DIR.iterdir():
+                if acc_dir.is_dir():
+                    token_file = acc_dir / "token_usage.json"
+                    if token_file.exists():
+                        data = load_json_file(token_file, {})
+                        for date_str, usage in data.items():
+                            if date_str not in aggregated:
+                                aggregated[date_str] = {"input": 0, "output": 0}
+                            aggregated[date_str]["input"] += usage.get("input", 0)
+                            aggregated[date_str]["output"] += usage.get("output", 0)
+        
+        # Сортировка по дате
+        sorted_dates = sorted(aggregated.keys())
+        return {
+            "dates": sorted_dates,
+            "input": [aggregated[d]["input"] for d in sorted_dates],
+            "output": [aggregated[d]["output"] for d in sorted_dates]
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/accounts/reset/{name}")
 async def reset_account(name: str, username: str = Depends(authenticate)):
@@ -475,4 +682,14 @@ WantedBy=multi-user.target
     return {"config": config, "path": "/etc/systemd/system/tg-assistant.service"}
 
 if __name__ == "__main__":
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=True)
+    ssl_config = {}
+    if os.path.exists("cert.pem") and os.path.exists("key.pem"):
+        print("INFO: SSL Certificates found. Starting with HTTPS.")
+        ssl_config = {
+            "ssl_keyfile": "key.pem",
+            "ssl_certfile": "cert.pem"
+        }
+    else:
+        print("WARNING: No SSL certificates found. Passkeys will not work on remote devices.")
+    
+    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=True, **ssl_config)
