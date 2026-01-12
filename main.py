@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 import qrcode
 import argparse
 import sys
+import edge_tts
+from memory_utils import MemoryManager
 
 # ================= Конфигурация и Константы =================
 
@@ -140,6 +142,8 @@ class TelegramAssistant:
         self.logger = logging.getLogger(f"Bot_{session_name}")
         self.data_dir = ACCOUNTS_DIR / session_name
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Initialize Memory (RAG)
+        self.memory = MemoryManager(base_path=str(ACCOUNTS_DIR))
         
         self.settings = self.load_settings()
         self.gemini_prompt = self.settings.get("gemini_prompt", gemini_prompt)
@@ -286,15 +290,36 @@ class TelegramAssistant:
                 history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
 
             full_prompt = (
-                f"SYSTEM_INSTRUCTIONS: {self.gemini_prompt}\n"
-                f"{history_str}"
-                f"CURRENT_TASK: {instruction}\n"
-                f"MESSAGE: {user_message}\n"
-                f"Respond as defined in SYSTEM_INSTRUCTIONS."
-            )
+            # --- RAG: Retrieve Context ---
+            context = ""
+            if user_id:
+                try:
+                    context = self.memory.get_context(user_id, text, limit=3)
+                except Exception as e:
+                    self.logger.error(f"Memory retrieval error: {e}")
+
+            full_prompt = f"{self.gemini_prompt}\n\n"
+            if context:
+                full_prompt += f"[ПАМЯТЬ и КОНТЕКСТ ПРОШЛЫХ БЕСЕД]:\n{context}\n\n"
+            
+            # --- Short-term conversation history ---
+            if user_id:
+                 full_prompt += f"[ТЕКУЩАЯ ПЕРЕПИСКА]:\n{self.get_history_formatted(user_id)}\n"
+            
+            full_prompt += f"[ТЕКУЩАЯ СИТУАЦИЯ]: {instruction}\n[СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ]: {text}"
+            
             response = await self.ai_client.aio.models.generate_content(
                 model=self.ai_model, contents=full_prompt
             )
+
+            # --- RAG: Save Interaction ---
+            if user_id and response.text:
+                try:
+                     self.memory.add_memory(user_id, f"User: {text}", "user")
+                     self.memory.add_memory(user_id, f"Bot: {response.text}", "assistant")
+                except Exception as e:
+                     self.logger.error(f"Memory save error: {e}")
+
             self._report_token_usage(response.usage_metadata)
             return response.text.strip()
         
@@ -342,6 +367,43 @@ class TelegramAssistant:
             
         res = await self._safe_ai_call(_call)
         return res if res else (False, 0)
+
+    async def generate_voice_file(self, text, user_id):
+        """Generates a voice file from text using edge-tts."""
+        try:
+            voice = self.settings.get("voice_id", "ru-RU-SvetlanaNeural")
+            communicate = edge_tts.Communicate(text, voice)
+            filename = f"voice_{user_id}_{int(time.time()*1000)}.mp3"
+            output_path = self.data_dir / filename
+            await communicate.save(str(output_path))
+            return output_path
+        except Exception as e:
+            self.logger.error(f"TTS Error: {e}")
+            return None
+
+    async def send_smart_reply(self, event, text, user_id):
+        if not text: return
+        
+        # Check condition: Setting ON or Incoming was Voice
+        voice_mode = self.settings.get("voice_mode", False)
+        # Check if incoming message was voice (need to access event safely)
+        is_voice_in = bool(event.message.voice or event.message.video_note)
+        
+        # Convert text to voice if needed
+        if (voice_mode or is_voice_in):
+             # Имитация записи голосового
+             async with self.client.action(user_id, 'record-voice'):
+                 path = await self.generate_voice_file(text, user_id)
+             
+             if path:
+                 await event.reply(file=path)
+                 if os.path.exists(path):
+                    os.remove(path)
+                 self.add_to_history(user_id, "assistant", text) # Log text version
+                 return
+
+        await event.reply(text)
+        self.add_to_history(user_id, "assistant", text)
 
     # --- Авторизация ---
     async def auth(self, interactive=False):
@@ -489,8 +551,7 @@ class TelegramAssistant:
             if not self.settings.get("ai_enabled", True):
                 # AI выключен, отправляем стандартный ответ
                 final_reply = AUTO_REPLY_TEXT
-                await event.reply(final_reply)
-                self.add_to_history(sender.id, "assistant", final_reply)
+                await self.send_smart_reply(event, final_reply, sender.id)
                 self.user_states[sender.id] = 1
                 self.save_data('states')
                 return # Завершаем обработку, если AI выключен
@@ -510,8 +571,7 @@ class TelegramAssistant:
                     reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
                 
                 final_reply = reply or AUTO_REPLY_TEXT
-                await event.reply(final_reply)
-                self.add_to_history(sender.id, "assistant", final_reply)
+                await self.send_smart_reply(event, final_reply, sender.id)
                 
                 self.user_states[sender.id] = 1
                 self.save_data('states')
@@ -524,8 +584,7 @@ class TelegramAssistant:
                 reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
                 
                 final_reply = reply or SECOND_REPLY_TEXT
-                await event.reply(final_reply)
-                self.add_to_history(sender.id, "assistant", final_reply)
+                await self.send_smart_reply(event, final_reply, sender.id)
 
                 self.user_states[sender.id] = 2
                 self.save_data('states')
@@ -536,8 +595,7 @@ class TelegramAssistant:
                 instr = "Диалог уже был уведомлен владельцу. Просто вежливо ответь на сообщение."
                 reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
                 if reply:
-                    await event.reply(reply)
-                    self.add_to_history(sender.id, "assistant", reply)
+                    await self.send_smart_reply(event, reply, sender.id)
 
         # Команды управления
         @self.client.on(events.NewMessage(pattern=r'/(?:allow|unblock)_(\d+)', from_users='me'))
@@ -782,6 +840,9 @@ class AccountManager:
         try:
             user = await qr.wait(timeout=2)
             if user:
+                # Сначала отключаемся, чтобы освободить файл сессии
+                await client.disconnect()
+                
                 if not any(acc['name'] == name for acc in self.config['accounts']):
                     self.config['accounts'].append({"name": name})
                     self.save_config()

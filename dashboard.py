@@ -523,9 +523,11 @@ async def get_account_settings(name: str, username: str = Depends(authenticate))
     
     settings_file = acc_dir / "settings.json"
     default_settings = {
-        "gemini_prompt": os.getenv("GEMINI_PROMPT", "Ты личный ассистент..."),
+        "gemini_prompt": os.getenv("GEMINI_PROMPT", "Ты личный ассистент. Отвечай кратко, вежливо и по делу."),
         "ai_enabled": True,
-        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        "voice_mode": False,
+        "voice_id": "ru-RU-SvetlanaNeural"
     }
     
     if settings_file.exists():

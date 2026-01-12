@@ -7,3 +7,5 @@ fastapi
 uvicorn
 psutil
 webauthn
+edge-tts
+chromadb

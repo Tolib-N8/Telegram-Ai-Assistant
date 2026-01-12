@@ -295,6 +295,33 @@
                         </div>
                     </div>
                 </div>
+
+                <div
+                    style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:20px; border-radius:20px; border: 1px solid var(--glass-border);">
+                    <div>
+                        <div style="font-weight:700; font-size:1.1rem; margin-bottom:4px;">Голосовой Режим (TTS)</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim);">Бот будет отвечать голосом на сообщения
+                        </div>
+                    </div>
+                    <div id="settings-voice-toggle" onclick="toggleSettingsVoice()"
+                        style="width: 52px; height: 28px; background: var(--glass-surface); border-radius: 14px; cursor: pointer; position:relative; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);">
+                        <div id="settings-voice-knob"
+                            style="position:absolute; left:4px; top:4px; width:20px; height:20px; background:white; border-radius:50%; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 2px 8px rgba(0,0,0,0.3);">
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <label
+                        style="display:block; margin-bottom:12px; font-size:0.85rem; font-weight:600; color:var(--text-dim);">Голос
+                        (Edge-TTS)</label>
+                    <select id="settings-voice-id" class="input-fancy">
+                        <option value="ru-RU-SvetlanaNeural">Svetlana (Ru)</option>
+                        <option value="ru-RU-DmitryNeural">Dmitry (Ru)</option>
+                        <option value="en-US-JennyNeural">Jenny (En)</option>
+                        <option value="en-US-GuyNeural">Guy (En)</option>
+                    </select>
+                </div>
             </div>
 
             <div style="margin-top: 3.5rem; display: flex; gap: 15px;">

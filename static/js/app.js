@@ -4,6 +4,7 @@ let allLogs = [];
 let autoScrollEnabled = true;
 let currentSettingsAccount = null;
 let settingsAiEnabled = true;
+let settingsVoice = false;
 let currentAuthName = null;
 let authCheckInterval = null;
 
@@ -389,6 +390,11 @@ function toggleSettingsAI() {
     updateSettingsUI();
 }
 
+function toggleSettingsVoice() {
+    settingsVoice = !settingsVoice;
+    updateSettingsUI();
+}
+
 function updateSettingsUI() {
     const toggle = document.getElementById('settings-ai-toggle');
     const knob = document.getElementById('settings-ai-knob');
@@ -403,7 +409,24 @@ function updateSettingsUI() {
         knob.style.right = 'auto';
         knob.style.left = '4px';
     }
+
+    const vToggle = document.getElementById('settings-voice-toggle');
+    const vKnob = document.getElementById('settings-voice-knob');
+    if (vToggle && vKnob) {
+        if (settingsVoice) {
+            vToggle.style.background = 'var(--primary)';
+            vToggle.style.boxShadow = '0 0 15px var(--primary-glow)';
+            vKnob.style.left = 'auto';
+            vKnob.style.right = '4px';
+        } else {
+            vToggle.style.background = 'rgba(255,255,255,0.1)';
+            vToggle.style.boxShadow = 'none';
+            vKnob.style.left = '4px';
+            vKnob.style.right = 'auto';
+        }
+    }
 }
+
 
 async function openSettings(name) {
     currentSettingsAccount = name;
@@ -415,7 +438,9 @@ async function openSettings(name) {
 
         document.getElementById('settings-prompt').value = settings.gemini_prompt;
         settingsAiEnabled = settings.ai_enabled;
+        settingsVoice = settings.voice_mode || false;
         document.getElementById('settings-model').value = settings.gemini_model || "gemini-2.0-flash";
+        document.getElementById('settings-voice-id').value = settings.voice_id || "ru-RU-SvetlanaNeural";
         updateSettingsUI();
     } catch (err) {
         showToast("Не удалось загрузить настройки", "error");
@@ -430,10 +455,13 @@ async function saveSettings() {
 
     const prompt = document.getElementById('settings-prompt').value;
     const model = document.getElementById('settings-model').value;
+    const voiceId = document.getElementById('settings-voice-id').value;
     const settings = {
         gemini_prompt: prompt,
         ai_enabled: settingsAiEnabled,
-        gemini_model: model
+        gemini_model: model,
+        voice_mode: settingsVoice,
+        voice_id: voiceId
     };
 
     try {
