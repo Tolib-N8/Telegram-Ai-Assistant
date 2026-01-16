@@ -23,6 +23,22 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResp
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, APIKeyCookie
 import auth_utils
 
+# Настройка логирования до импортов
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
+# Подавляем спам от watchfiles и uvicorn
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
+logging.getLogger("watchfiles.reloader").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 # Загружаем переменные окружения в начале
 load_dotenv()
 
@@ -695,4 +711,4 @@ if __name__ == "__main__":
     else:
         print("WARNING: No SSL certificates found. Passkeys will not work on remote devices.")
     
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=True, **ssl_config)
+    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=True, reload_excludes=["accounts/*", "*.log", "*.json", "*.tmp"], **ssl_config)

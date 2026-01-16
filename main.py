@@ -21,15 +21,16 @@ from memory_utils import MemoryManager
 
 # ================= Конфигурация и Константы =================
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# Настройка логирования (если не настроено ранее)
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("bot.log", encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
 logger = logging.getLogger("Manager")
 
 # Тексты (резервные)
@@ -289,12 +290,11 @@ class TelegramAssistant:
             if user_id:
                 history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
 
-            full_prompt = (
             # --- RAG: Retrieve Context ---
             context = ""
             if user_id:
                 try:
-                    context = self.memory.get_context(user_id, text, limit=3)
+                    context = self.memory.get_context(user_id, user_message, limit=3)
                 except Exception as e:
                     self.logger.error(f"Memory retrieval error: {e}")
 
@@ -306,7 +306,7 @@ class TelegramAssistant:
             if user_id:
                  full_prompt += f"[ТЕКУЩАЯ ПЕРЕПИСКА]:\n{self.get_history_formatted(user_id)}\n"
             
-            full_prompt += f"[ТЕКУЩАЯ СИТУАЦИЯ]: {instruction}\n[СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ]: {text}"
+            full_prompt += f"[ТЕКУЩАЯ СИТУАЦИЯ]: {instruction}\n[СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ]: {user_message}"
             
             response = await self.ai_client.aio.models.generate_content(
                 model=self.ai_model, contents=full_prompt
@@ -315,7 +315,7 @@ class TelegramAssistant:
             # --- RAG: Save Interaction ---
             if user_id and response.text:
                 try:
-                     self.memory.add_memory(user_id, f"User: {text}", "user")
+                     self.memory.add_memory(user_id, f"User: {user_message}", "user")
                      self.memory.add_memory(user_id, f"Bot: {response.text}", "assistant")
                 except Exception as e:
                      self.logger.error(f"Memory save error: {e}")
