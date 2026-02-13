@@ -4,10 +4,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#050505">
+    <meta name="theme-color" content="#05070b">
     <link rel="manifest" href="/static/manifest.json">
     <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
-    <title>AI Assistant Pro | Liquid Glass Dashboard</title>
+    <title>AI Assistant Pro</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 
@@ -18,23 +18,30 @@
     <div class="orb orb-2"></div>
     <div class="orb orb-3"></div>
 
-    <header>
-        <div class="logo-container">
-            <h1>AI Assistant <span
-                    style="font-size:0.65rem; opacity:0.5; font-weight:500; letter-spacing:0.2em; margin-left:12px; -webkit-text-fill-color: initial; color:#fff;">PRO
-                    V0.9.9F</span></h1>
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand__glyph" aria-hidden="true">
+                <img class="logo-mark" src="/static/icons/logo.svg" alt="">
+            </div>
+            <div class="brand__text">
+                <h1>AI Assistant</h1>
+                <div class="brand__meta">
+                    <span class="pill">PRO</span>
+                    <span class="brand__ver">v1.0</span>
+                </div>
+            </div>
         </div>
-        <div style="display:flex; gap:12px;">
-            <button class="btn" onclick="showSystemd()">
+        <div class="top-actions">
+            <button class="btn btn-ghost" onclick="showSystemd()">
                 <i data-lucide="cog"></i> <span>Systemd</span>
             </button>
-            <button class="btn" onclick="openConfig()" title="Конфиг">
+            <button class="btn btn-icon" onclick="openConfig()" title="Конфиг" aria-label="Конфиг">
                 <i data-lucide="settings-2"></i>
             </button>
-            <button class="btn" onclick="registerPasskey()" title="Регистрация Passkey">
+            <button class="btn btn-icon" onclick="registerPasskey()" title="Passkey" aria-label="Passkey">
                 <i data-lucide="fingerprint"></i>
             </button>
-            <button class="btn" onclick="logout()" title="Выйти">
+            <button class="btn btn-icon" onclick="logout()" title="Выйти" aria-label="Выйти">
                 <i data-lucide="log-out"></i>
             </button>
             <button class="btn btn-primary" onclick="openModal()">
@@ -44,25 +51,22 @@
     </header>
 
     <div class="container">
-        <!-- Server Status Card -->
-        <div class="card" style="margin-bottom: 3.5rem;">
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap: wrap; gap: 32px;">
-                <div style="display:flex; align-items:center; gap:24px;">
-                    <div
-                        style="background:linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(139, 92, 246, 0.1)); padding:20px; border-radius:24px; box-shadow: 0 8px 32px rgba(139, 92, 246, 0.15); border: 1px solid rgba(255,255,255,0.05);">
-                        <i data-lucide="cpu" style="color:var(--primary); width:32px; height:32px;"></i>
+        <!-- System -->
+        <section class="card system">
+            <div class="system__head">
+                <div class="system__left">
+                    <div class="system__icon" aria-hidden="true">
+                        <i data-lucide="cpu"></i>
                     </div>
-                    <div>
-                        <h2 style="margin:0; font-size:1.5rem; font-weight:800; letter-spacing:-0.03em;">Система
-                            управления</h2>
-                        <div id="server-status-info"
-                            style="font-size:0.9rem; color:var(--text-dim); margin-top:8px; display:flex; align-items:center; gap:12px;">
-                            <span class="status-indicator" id="server-indicator" style="background:#4b5563;"></span>
-                            <span id="server-status-text" style="font-weight:500;">Инициализация...</span>
+                    <div class="system__meta">
+                        <h2>Система управления</h2>
+                        <div id="server-status-info" class="system__status">
+                            <span class="status-indicator" id="server-indicator"></span>
+                            <span id="server-status-text">Инициализация...</span>
                         </div>
                     </div>
                 </div>
-                <div style="display:flex; gap:15px;">
+                <div class="system__actions">
                     <button class="btn" id="btn-main-start" onclick="controlMain('start')">
                         <i data-lucide="play"></i> <span>Старт</span>
                     </button>
@@ -75,87 +79,70 @@
                 </div>
             </div>
 
-            <!-- Monitoring Stats Graphs -->
-            <div
-                style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 30px; margin-top: 2.5rem; padding-top: 2.5rem; border-top: 1px solid var(--glass-border);">
-                <div style="height: 140px; position: relative;">
-                    <div
-                        style="position:absolute; top:0; left:0; font-size:0.7rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.1em;">
-                        ЦП Нагрузка</div>
+            <div class="system__charts">
+                <div class="chart-card">
+                    <div class="chart-title">ЦП нагрузка</div>
                     <canvas id="cpuChart"></canvas>
                 </div>
-                <div style="height: 140px; position: relative;">
-                    <div
-                        style="position:absolute; top:0; left:0; font-size:0.7rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.1em;">
-                        Память (ОЗУ)</div>
+                <div class="chart-card">
+                    <div class="chart-title">Память (ОЗУ)</div>
                     <canvas id="ramChart"></canvas>
                 </div>
-                <!-- Token Stats -->
-                <div style="height: 140px; position: relative;">
-                    <div
-                        style="position:absolute; top:0; left:0; font-size:0.7rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.1em;">
-                        Использование Токенов (AI)</div>
+                <div class="chart-card">
+                    <div class="chart-title">Токены (AI)</div>
                     <canvas id="tokenChart"></canvas>
                 </div>
             </div>
-        </div>
+        </section>
 
         <div id="accounts-grid" class="grid">
             <!-- Dynamic accounts injected here -->
         </div>
 
-        <!-- Logs Section -->
-        <div class="card" style="margin-top: 3.5rem; padding: 0;">
-            <div style="padding: 2rem 2rem 0 2rem;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 2rem;">
-                    <div style="display:flex; align-items:center; gap:12px;">
-                        <div style="background:rgba(34, 197, 94, 0.1); padding:8px; border-radius:10px;">
-                            <i data-lucide="terminal" style="width:20px; height:20px; color:var(--success);"></i>
-                        </div>
-                        <h3 style="margin:0; font-size:1.1rem; font-weight:700;">Журнал событий</h3>
-                    </div>
-                    <div style="display:flex; gap:12px;">
-                        <button class="btn" style="padding: 8px 16px; font-size: 0.8rem; height: 36px;"
-                            onclick="exportLogs()">
-                            <i data-lucide="download" style="width:14px;"></i> Экспорт
-                        </button>
-                        <button class="btn btn-danger" style="padding: 8px 16px; font-size: 0.8rem; height: 36px;"
-                            onclick="clearLogs()">
-                            <i data-lucide="trash-2" style="width:14px;"></i> Очистить
-                        </button>
+        <!-- Logs -->
+        <section class="card logs">
+            <div class="logs__head">
+                <div class="logs__title">
+                    <div class="logs__icon" aria-hidden="true"><i data-lucide="terminal"></i></div>
+                    <div>
+                        <h3>Журнал событий</h3>
+                        <div class="subtle">Поток логов в реальном времени</div>
                     </div>
                 </div>
+                <div class="logs__actions">
+                    <button class="btn btn-ghost" onclick="exportLogs()">
+                        <i data-lucide="download"></i> <span>Экспорт</span>
+                    </button>
+                    <button class="btn btn-danger" onclick="clearLogs()">
+                        <i data-lucide="trash-2"></i> <span>Очистить</span>
+                    </button>
+                </div>
+            </div>
 
-                <!-- Filter Bar -->
-                <div class="filter-bar">
-                    <div class="search-wrapper">
-                        <i data-lucide="search"></i>
-                        <input type="text" id="log-search" class="input-fancy"
-                            placeholder="Поиск по логам (например, 'error' или имя аккаунта)..." oninput="filterLogs()">
-                    </div>
-                    <div class="severity-tabs" id="log-severity-filters">
-                        <div class="severity-tab active" data-level="all" onclick="setLogFilter('all')">Все</div>
-                        <div class="severity-tab" data-level="info" onclick="setLogFilter('info')">Info</div>
-                        <div class="severity-tab" data-level="warning" onclick="setLogFilter('warning')">Warn</div>
-                        <div class="severity-tab" data-level="error" onclick="setLogFilter('error')">Error</div>
-                    </div>
-                    <div class="toggle-wrapper" style="margin-left:auto; display:flex; align-items:center; gap:10px;">
-                        <span style="font-size:0.8rem; color:var(--text-dim); font-weight:600;">Авто-скролл</span>
-                        <div id="autoscroll-toggle" onclick="toggleAutoscroll()"
-                            style="width: 44px; height: 24px; background: var(--primary); border-radius: 12px; cursor: pointer; position:relative; transition: all 0.4s ease;">
-                            <div id="autoscroll-knob"
-                                style="position:absolute; right:3px; top:3px; width:18px; height:18px; background:white; border-radius:50%; transition: all 0.4s ease;">
-                            </div>
-                        </div>
+            <div class="logs__filters">
+                <div class="search-wrapper">
+                    <i data-lucide="search"></i>
+                    <input type="text" id="log-search" class="input-fancy"
+                        placeholder="Поиск по логам: error, warn, имя аккаунта..." oninput="filterLogs()">
+                </div>
+                <div class="severity-tabs" id="log-severity-filters">
+                    <div class="severity-tab active" data-level="all" onclick="setLogFilter('all')">Все</div>
+                    <div class="severity-tab" data-level="info" onclick="setLogFilter('info')">Info</div>
+                    <div class="severity-tab" data-level="warning" onclick="setLogFilter('warning')">Warn</div>
+                    <div class="severity-tab" data-level="error" onclick="setLogFilter('error')">Error</div>
+                </div>
+                <div class="toggle-wrapper">
+                    <span>Авто-скролл</span>
+                    <div id="autoscroll-toggle" class="switch" onclick="toggleAutoscroll()">
+                        <div id="autoscroll-knob" class="switch__knob"></div>
                     </div>
                 </div>
             </div>
 
             <div class="log-viewer" id="log-viewer">
-                <div class="log-line" style="color:var(--text-dim); text-align:center; padding-top:2rem;">Ожидание
-                    данных...</div>
+                <div class="log-line log-line--empty">Ожидание данных...</div>
             </div>
-        </div>
+        </section>
     </div>
 
     <!-- Toast Container -->
@@ -166,9 +153,7 @@
         <div class="modal-content">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2rem;">
                 <h2 style="margin:0; font-size:1.75rem; font-weight:800; letter-spacing:-0.04em;">Новый аккаунт</h2>
-                <button class="btn"
-                    style="padding:8px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,0.05);"
-                    onclick="closeModal()">
+                <button class="btn btn-icon btn-ghost" onclick="closeModal()" aria-label="Закрыть">
                     <i data-lucide="x"></i>
                 </button>
             </div>
@@ -226,6 +211,13 @@
 
             <div id="auth-status" style="margin-top: 2rem; font-weight:600; text-align:center;"></div>
 
+            <div id="auth-cancel-wrap" style="display:none; margin-top: 1rem;">
+                <button id="btn-auth-cancel" class="btn btn-danger" style="width:100%; height:46px;"
+                    onclick="cancelAuth()">
+                    Отменить авторизацию <i data-lucide="x-circle"></i>
+                </button>
+            </div>
+
             <div id="qr-container" style="display: none; margin-top: 2rem; text-align:center;">
                 <div id="qr-code"
                     style="background:#fff; padding:15px; border-radius:24px; display:inline-block; box-shadow: 0 0 40px rgba(255,255,255,0.1);">
@@ -252,9 +244,7 @@
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2.5rem;">
                 <h2 id="settings-title" style="margin:0; font-size:1.75rem; font-weight:800; letter-spacing:-0.04em;">
                     Настройки</h2>
-                <button class="btn"
-                    style="padding:8px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,0.05);"
-                    onclick="closeSettings()">
+                <button class="btn btn-icon btn-ghost" onclick="closeSettings()" aria-label="Закрыть">
                     <i data-lucide="x"></i>
                 </button>
             </div>
@@ -309,9 +299,7 @@
         <div class="drawer-header">
             <h2 id="history-title" style="margin:0; font-size:1.75rem; font-weight:800; letter-spacing:-0.04em;">
                 История чата</h2>
-            <button class="btn"
-                style="padding:8px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,0.05);"
-                onclick="closeHistory()">
+            <button class="btn btn-icon btn-ghost" onclick="closeHistory()" aria-label="Закрыть">
                 <i data-lucide="x"></i>
             </button>
         </div>
@@ -326,9 +314,7 @@
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2.5rem;">
                 <h2 id="list-title" style="margin:0; font-size:1.75rem; font-weight:800; letter-spacing:-0.04em;">
                     Управление списками</h2>
-                <button class="btn"
-                    style="padding:8px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,0.05);"
-                    onclick="closeLists()">
+                <button class="btn btn-icon btn-ghost" onclick="closeLists()" aria-label="Закрыть">
                     <i data-lucide="x"></i>
                 </button>
             </div>
@@ -371,9 +357,7 @@
                         style="font-size:0.75rem; color:var(--text-dim); margin-top:4px; font-family:'JetBrains Mono', monospace;">
                     </p>
                 </div>
-                <button class="btn"
-                    style="padding:8px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,0.05);"
-                    onclick="closeSystemd()">
+                <button class="btn btn-icon btn-ghost" onclick="closeSystemd()" aria-label="Закрыть">
                     <i data-lucide="x"></i>
                 </button>
             </div>
@@ -396,7 +380,7 @@
         <div class="modal-content">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2rem;">
                 <h3 style="margin:0; font-size:1.5rem; font-weight:800;">.env Настройки</h3>
-                <button class="btn" style="width:40px; height:40px; padding:0;" onclick="closeConfig()">
+                <button class="btn btn-icon btn-ghost" onclick="closeConfig()" aria-label="Закрыть">
                     <i data-lucide="x"></i>
                 </button>
             </div>
@@ -414,7 +398,7 @@
     <div id="drawer-ai" class="drawer">
         <div class="drawer-header">
             <h3 style="margin:0; font-size:1.5rem; font-weight:800;">AI Playground</h3>
-            <button class="btn" style="width:40px; height:40px; padding:0;" onclick="closeAiPlayground()">
+            <button class="btn btn-icon btn-ghost" onclick="closeAiPlayground()" aria-label="Закрыть">
                 <i data-lucide="x"></i>
             </button>
         </div>

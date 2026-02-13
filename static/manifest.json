@@ -4,8 +4,8 @@
     "description": "Dashboard for managing Telegram AI Assistants",
     "start_url": "/",
     "display": "standalone",
-    "background_color": "#050505",
-    "theme_color": "#8B5CF6",
+    "background_color": "#05070b",
+    "theme_color": "#22d3ee",
     "icons": [
         {
             "src": "/static/icons/icon-192.png",

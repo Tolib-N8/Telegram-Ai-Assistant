@@ -29,8 +29,8 @@ load_dotenv()
 # Импортируем существующую логику
 from main import AccountManager, MANAGER_CONFIG, ACCOUNTS_DIR, load_json_file
 
-app = FastAPI(title="Telegram Assistant Dashboard", version="0.9.9G")
-VERSION = "v0.9.9G"
+app = FastAPI(title="Telegram Assistant Dashboard", version="1.0")
+VERSION = "v1.0"
 
 # Сессии и Безопасность
 SECRET_KEY = os.getenv("DASHBOARD_SECRET", secrets.token_urlsafe(32))
@@ -67,6 +67,21 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 manager = AccountManager()
 
+@app.on_event("startup")
+async def _startup_background_cleanup():
+    # Periodically cleanup stale auth sessions to avoid holding Telethon sqlite session locks.
+    async def _loop():
+        while True:
+            try:
+                # Implemented in main.py AccountManager; safe no-op if it ever changes.
+                if hasattr(manager, "_cleanup_stale_auths"):
+                    await manager._cleanup_stale_auths()
+            except Exception:
+                pass
+            await asyncio.sleep(60)
+
+    asyncio.create_task(_loop())
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(user: str = Depends(get_session_user)):
     if user:
@@ -81,7 +96,11 @@ async def api_login(req: Request):
     password = data.get("password")
     
     correct_username = os.getenv("DASHBOARD_USER", "admin")
-    correct_password = os.getenv("DASHBOARD_PASSWORD", "08908090") # default from .env
+    # Avoid predictable defaults. If not configured, generate an ephemeral password and warn.
+    correct_password = os.getenv("DASHBOARD_PASSWORD")
+    if not correct_password:
+        correct_password = secrets.token_urlsafe(16)
+        logging.warning("DASHBOARD_PASSWORD is not set. Generated a random one for this run.")
     
     if username == correct_username and password == correct_password:
         token = serializer.dumps({"user": username, "ts": time.time()})
@@ -147,14 +166,16 @@ async def register_verify(req: Request, user: str = Depends(authenticate)):
 @app.post("/api/auth/login/options")
 async def login_options(request: Request):
     data = await request.json()
-    username = data.get("username")
-    if not username:
-        return JSONResponse({"status": "error", "message": "Username required"}, status_code=400)
-
     rp_id = request.url.hostname or os.getenv('RP_ID', 'localhost')
-    options = auth_utils.get_webauthn_authentication_options(username, rp_id=rp_id)
-    if not options:
-        return JSONResponse({"status": "error", "message": "No passkeys found for this user"}, status_code=404)
+    username = data.get("username") if isinstance(data, dict) else None
+
+    if username:
+        options = auth_utils.get_webauthn_authentication_options(username, rp_id=rp_id)
+        if not options:
+            return JSONResponse({"status": "error", "message": "No passkeys found for this user"}, status_code=404)
+    else:
+        # Username-less flow (discoverable credentials)
+        options = auth_utils.get_webauthn_authentication_options_any(rp_id=rp_id)
 
     # Store challenge by username for login (use JSON form to ensure string)
     options_json = auth_utils.options_to_json(options)
@@ -165,18 +186,28 @@ async def login_options(request: Request):
             pass
 
     origin = str(request.base_url).rstrip('/')
-    webauthn_challenges[f"login_{username}"] = {
+    login_id = secrets.token_urlsafe(16)
+    webauthn_challenges[f"login_{login_id}"] = {
         'challenge': options_json.get('challenge') if isinstance(options_json, dict) else None,
         'expected_origin': origin,
         'expected_rp_id': rp_id,
+        'username': username,
     }
+    if isinstance(options_json, dict):
+        options_json["login_id"] = login_id
     return JSONResponse(options_json)
 
 @app.post("/api/auth/login/verify")
 async def login_verify(req: Request):
     data = await req.json()
-    username = data.get("username")
-    stored = webauthn_challenges.get(f"login_{username}")
+    username = data.get("username") if isinstance(data, dict) else None
+    login_id = data.get("login_id") if isinstance(data, dict) else None
+
+    if not login_id:
+        return JSONResponse({"status": "error", "message": "login_id required"}, status_code=400)
+
+    stored_key = f"login_{login_id}"
+    stored = webauthn_challenges.get(stored_key)
 
     if not stored:
         return JSONResponse({"status": "error", "message": "Challenge not found"}, status_code=400)
@@ -185,9 +216,18 @@ async def login_verify(req: Request):
         data['_expected_origin'] = stored.get('expected_origin')
         data['_expected_rp_id'] = stored.get('expected_rp_id')
 
-    success = auth_utils.verify_webauthn_authentication(username, data, stored.get('challenge'))
-    if success:
-        token = serializer.dumps({"user": username, "ts": time.time()})
+    # Prefer stored username if provided; otherwise use discoverable credential flow.
+    stored_username = stored.get("username") or username
+    if stored_username:
+        success = auth_utils.verify_webauthn_authentication(stored_username, data, stored.get('challenge'))
+        authed_user = stored_username if success else None
+    else:
+        authed_user = auth_utils.verify_webauthn_authentication_any(data, stored.get('challenge'))
+
+    if authed_user:
+        # One-time use challenge
+        webauthn_challenges.pop(stored_key, None)
+        token = serializer.dumps({"user": authed_user, "ts": time.time()})
         response = JSONResponse({"status": "success"})
         response.set_cookie(key="session", value=token, httponly=True, samesite="lax")
         return response
@@ -259,6 +299,22 @@ async def auth_2fa(req: Request, username: str = Depends(authenticate)):
     password = data.get("password")
     result = await manager.add_account_web_2fa(name, password)
     return result
+
+@app.post("/api/accounts/auth/cancel")
+async def auth_cancel(req: Request, username: str = Depends(authenticate)):
+    data = await req.json()
+    name = data.get("name")
+    if not name:
+        return JSONResponse({"status": "error", "message": "Name required"}, status_code=400)
+
+    # Best-effort cleanup: disconnect the Telethon client to release sqlite session locks.
+    try:
+        if hasattr(manager, "_cleanup_auth"):
+            await manager._cleanup_auth(name)
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    return {"status": "success"}
 
 @app.post("/api/accounts/auth/phone/start")
 async def auth_phone_start(req: Request, username: str = Depends(authenticate)):
@@ -360,8 +416,21 @@ async def get_logs(limit: int = 100, username: str = Depends(authenticate)):
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
-    # For simplicity, we don't authenticate WS in this basic version, 
-    # but in production, we should check a token.
+    # Authenticate using the same signed session cookie as the rest of the dashboard.
+    session = websocket.cookies.get("session") if hasattr(websocket, "cookies") else None
+    user = None
+    if session:
+        try:
+            data = serializer.loads(session)
+            user = data.get("user")
+        except Exception:
+            user = None
+
+    if not user:
+        # 1008 = Policy Violation
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     log_file = Path("bot.log")
     
@@ -512,8 +581,6 @@ async def save_account_lists(name: str, data: ListUpdate, username: str = Depend
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 @app.get("/api/accounts/settings/{name}")
 async def get_account_settings(name: str, username: str = Depends(authenticate)):
@@ -525,7 +592,7 @@ async def get_account_settings(name: str, username: str = Depends(authenticate))
     default_settings = {
         "gemini_prompt": os.getenv("GEMINI_PROMPT", "Ты личный ассистент..."),
         "ai_enabled": True,
-        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     }
     
     if settings_file.exists():
@@ -618,6 +685,11 @@ async def get_main_status(username: str = Depends(authenticate)):
 async def start_main(username: str = Depends(authenticate)):
     if find_main_process():
         return {"status": "error", "message": "Бот уже запущен"}
+
+    # Prevent starting supervisor while an auth flow holds the sqlite session file open.
+    if getattr(manager, "active_auths", None):
+        if len(manager.active_auths) > 0:
+            return {"status": "error", "message": "Завершите/отмените авторизацию аккаунта в Dashboard перед запуском."}
     
     try:
         # Запускаем как отдельный процесс

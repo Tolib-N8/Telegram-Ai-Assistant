@@ -131,6 +131,25 @@ def get_webauthn_authentication_options(username, rp_id=None):
     )
     return options
 
+def get_webauthn_authentication_options_any(rp_id=None):
+    """
+    Username-less (discoverable credentials) authentication options.
+    If a passkey was created as a resident/discoverable credential, the browser can pick it without allowCredentials.
+    """
+    options = generate_authentication_options(
+        rp_id=rp_id or os.getenv("RP_ID", "localhost"),
+        user_verification=UserVerificationRequirement.PREFERRED,
+    )
+    return options
+
+def _find_passkey_owner_by_credential_id(credential_id: str):
+    passkeys = load_passkeys()
+    for username, user_passkeys in passkeys.items():
+        for pk in user_passkeys:
+            if pk.get("credential_id") == credential_id:
+                return username, pk
+    return None, None
+
 def verify_webauthn_authentication(username, response_data, challenge):
     passkeys = load_passkeys()
     user_passkeys = passkeys.get(username, [])
@@ -178,3 +197,54 @@ def verify_webauthn_authentication(username, response_data, challenge):
         print(f"Authentication verification failed: {e}")
         return False
 
+def verify_webauthn_authentication_any(response_data, challenge):
+    """
+    Verify authentication without providing a username. We determine the username by credential_id.
+    Returns the username on success, otherwise None.
+    """
+    cred_id = response_data.get("id")
+    if not cred_id:
+        return None
+
+    username, credential = _find_passkey_owner_by_credential_id(cred_id)
+    if not credential:
+        return None
+
+    try:
+        expected_challenge = challenge
+        if isinstance(challenge, str):
+            try:
+                expected_challenge = base64url_to_bytes(challenge)
+            except Exception:
+                expected_challenge = challenge
+
+        expected_origin = response_data.get('_expected_origin') if isinstance(response_data, dict) and response_data.get('_expected_origin') else os.getenv("EXPECTED_ORIGIN", "http://localhost:8000")
+        expected_rp_id = response_data.get('_expected_rp_id') if isinstance(response_data, dict) and response_data.get('_expected_rp_id') else os.getenv("RP_ID", "localhost")
+
+        if isinstance(response_data, dict):
+            cleanup_data = response_data.copy()
+            cleanup_data.pop('_expected_origin', None)
+            cleanup_data.pop('_expected_rp_id', None)
+        else:
+            cleanup_data = response_data
+
+        verification = verify_authentication_response(
+            credential=cleanup_data,
+            expected_challenge=expected_challenge,
+            expected_origin=expected_origin,
+            expected_rp_id=expected_rp_id,
+            credential_public_key=base64url_to_bytes(credential["public_key"]),
+            credential_current_sign_count=credential["sign_count"],
+        )
+
+        # Update sign count for that credential
+        passkeys = load_passkeys()
+        for pk in passkeys.get(username, []):
+            if pk.get("credential_id") == cred_id:
+                pk["sign_count"] = verification.new_sign_count
+                break
+        save_passkeys(passkeys)
+        return username
+    except Exception as e:
+        print(f"Authentication verification failed: {e}")
+        return None

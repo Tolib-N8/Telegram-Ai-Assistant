@@ -6,6 +6,15 @@ let currentSettingsAccount = null;
 let settingsAiEnabled = true;
 let currentAuthName = null;
 let authCheckInterval = null;
+let authCancelInFlight = false;
+
+function setButtonLoading(btn, isLoading) {
+    if (!btn) return;
+    btn.classList.toggle('is-loading', isLoading);
+    btn.disabled = !!isLoading;
+    const svg = btn.querySelector('svg');
+    if (svg) svg.classList.toggle('animate-spin', !!isLoading);
+}
 
 // --- Utility Functions ---
 function updateIcons() {
@@ -274,10 +283,10 @@ function renderAccounts(accounts) {
     const grid = document.getElementById('accounts-grid');
     if (!accounts || accounts.length === 0) {
         grid.innerHTML = `
-            <div class="card card-entrance" style="grid-column: 1/-1; text-align:center; padding: 6rem 2rem;">
-                <div style="font-size: 4rem; margin-bottom: 2rem; opacity:0.3; filter: drop-shadow(0 0 20px rgba(139, 92, 246, 0.4));">🛰️</div>
-                <h3 style="margin:0; font-size:1.75rem; font-weight:800; letter-spacing:-0.03em;">Нет активных подключений</h3>
-                <p style="color:var(--text-dim); margin-top:12px; font-weight:500;">Добавьте ваш первый Telegram аккаунт для старта</p>
+            <div class="card empty-state card-entrance">
+                <div class="empty-state__glyph" aria-hidden="true">🛰️</div>
+                <h3 class="empty-state__title">Нет активных подключений</h3>
+                <p class="empty-state__text">Добавьте ваш первый Telegram аккаунт для старта</p>
             </div>`;
         renderedAccountNames.clear();
         return;
@@ -285,52 +294,60 @@ function renderAccounts(accounts) {
 
     const newHtml = accounts.map(acc => {
         const isOnline = acc.status.toLowerCase() === 'online';
-        const colorClass = isOnline ? 'var(--success)' : 'var(--error)';
         const isNew = !renderedAccountNames.has(acc.name);
         if (isNew) renderedAccountNames.add(acc.name);
 
+        const statusLabel = isOnline ? 'Online' : 'Offline';
+        const statusClass = isOnline ? 'is-online' : 'is-offline';
+        const safeName = String(acc.name || '').replace(/[&<>"']/g, (m) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+        }[m]));
+        const jsName = String(acc.name || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
         return `
-        <div class="card ${isNew ? 'card-entrance' : ''}">
-            <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom: 2rem;">
+        <div class="card account-card ${isNew ? 'card-entrance' : ''}">
+            <div class="account-head">
                 <div>
-                    <h3 style="margin:0; font-size:1.5rem; font-weight:800; letter-spacing:-0.04em; color:#fff;">${acc.name}</h3>
-                    <div style="display:flex; align-items:center; gap:10px; margin-top:10px; font-size:0.75rem; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.05em;">
-                        <span class="status-indicator" style="background:${colorClass};"></span> 
-                        ${acc.status}
+                    <div class="account-name">${safeName}</div>
+                    <div class="account-status ${statusClass}">
+                        <span class="status-indicator"></span>
+                        <span>${statusLabel}</span>
                     </div>
                 </div>
-                <div style="background:rgba(139, 92, 246, 0.15); color:var(--primary); padding:8px 14px; border-radius:12px; font-size:0.7rem; font-weight:800; border:1px solid rgba(139, 92, 246, 0.2); letter-spacing:0.1em;">
-                    AI MODE
-                </div>
+                <div class="badge">AI</div>
             </div>
 
-            <div class="stats-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 2.5rem;">
+            <div class="account-stats">
                 <div class="stat-box">
                     <span class="stat-label">Файлы</span>
                     <span class="stat-val">${acc.stats.blocked_files}</span>
                 </div>
                 <div class="stat-box">
                     <span class="stat-label">Скам</span>
-                    <span class="stat-val" style="color:var(--error);">${acc.stats.blocked_scams}</span>
+                    <span class="stat-val stat-val--danger">${acc.stats.blocked_scams}</span>
                 </div>
-                <div class="stat-box" style="grid-column: span 2; display:flex; justify-content:space-between; align-items:center; background:linear-gradient(135deg, rgba(34, 197, 94, 0.05), transparent);">
+                <div class="stat-box stat-box--wide">
                     <span class="stat-label">Новые контакты</span>
-                    <span class="stat-val" style="color:var(--success); font-size:1.75rem;">${acc.stats.total_unknown}</span>
+                    <span class="stat-val stat-val--good">${acc.stats.total_unknown}</span>
                 </div>
             </div>
 
-            <div style="margin-top:auto; display:flex; gap:12px; flex-wrap:wrap;">
-                <button class="btn" style="flex:1; min-width:45px;" onclick="openHistory('${acc.name}')" title="История">
-                    <i data-lucide="message-square" style="width:18px;"></i>
+            <div class="account-actions">
+                <button class="btn btn-icon btn-ghost" onclick="openHistory('${jsName}')" title="История" aria-label="История">
+                    <i data-lucide="message-square"></i>
                 </button>
-                <button class="btn" style="flex:1; min-width:45px;" onclick="openLists('${acc.name}')" title="Списки">
-                    <i data-lucide="list" style="width:18px;"></i>
+                <button class="btn btn-icon btn-ghost" onclick="openLists('${jsName}')" title="Списки" aria-label="Списки">
+                    <i data-lucide="list"></i>
                 </button>
-                <button class="btn" style="flex:1; min-width:45px;" onclick="openSettings('${acc.name}')" title="Настройки">
-                    <i data-lucide="settings" style="width:18px;"></i>
+                <button class="btn btn-icon btn-ghost" onclick="openSettings('${jsName}')" title="Настройки" aria-label="Настройки">
+                    <i data-lucide="settings"></i>
                 </button>
-                <button class="btn btn-danger" style="width:50px; flex-shrink:0;" onclick="deleteAccount('${acc.name}')" title="Удалить">
-                    <i data-lucide="trash-2" style="width:18px;"></i>
+                <button class="btn btn-icon btn-danger" onclick="deleteAccount('${jsName}')" title="Удалить" aria-label="Удалить">
+                    <i data-lucide="trash-2"></i>
                 </button>
             </div>
         </div>`;
@@ -415,7 +432,7 @@ async function openSettings(name) {
 
         document.getElementById('settings-prompt').value = settings.gemini_prompt;
         settingsAiEnabled = settings.ai_enabled;
-        document.getElementById('settings-model').value = settings.gemini_model || "gemini-2.0-flash";
+        document.getElementById('settings-model').value = settings.gemini_model || "gemini-2.5-flash";
         updateSettingsUI();
     } catch (err) {
         showToast("Не удалось загрузить настройки", "error");
@@ -478,6 +495,7 @@ async function startAuth() {
         if (data.status === 'qr') {
             showQR(data.url);
             startPolling();
+            setAuthCancelVisible(true);
             showToast("QR-код сгенерирован", "info");
         } else if (data.status === 'success') {
             showToast("Аккаунт уже авторизован!", "success");
@@ -508,6 +526,7 @@ function switchAuthTab(method) {
     qrContainer.style.display = 'none';
     statusDiv.innerText = "";
     if (authCheckInterval) clearInterval(authCheckInterval);
+    setAuthCancelVisible(false);
 
     if (method === 'qr') {
         tabQr.classList.add('active');
@@ -540,6 +559,12 @@ function switchAuthTab(method) {
     }
 }
 
+function setAuthCancelVisible(visible) {
+    const wrap = document.getElementById('auth-cancel-wrap');
+    if (!wrap) return;
+    wrap.style.display = visible ? 'block' : 'none';
+}
+
 async function startPhoneAuth() {
     const name = document.getElementById('account-name').value.trim();
     const phone = document.getElementById('auth-phone').value.trim();
@@ -563,6 +588,7 @@ async function startPhoneAuth() {
 
         if (data.status === 'sent') {
             showToast("Код отправлен в Telegram", "success");
+            setAuthCancelVisible(true);
             document.getElementById('phone-code-group').style.display = 'block';
             document.getElementById('btn-phone-start').style.display = 'none';
             document.getElementById('btn-phone-verify').style.display = 'block';
@@ -603,6 +629,7 @@ async function submitPhoneCode() {
             // Reuse existing 2FA UI but hide phone section
             document.getElementById('section-phone').style.display = 'none';
             document.getElementById('2fa-container').style.display = 'block';
+            setAuthCancelVisible(true);
             showToast("Введите пароль 2FA", "info");
         } else {
             showToast(data.message, "error");
@@ -644,6 +671,7 @@ function startPolling() {
                 clearInterval(authCheckInterval);
                 document.getElementById('qr-container').style.display = 'none';
                 document.getElementById('2fa-container').style.display = 'block';
+                setAuthCancelVisible(true);
                 showToast("Требуется пароль 2FA", "warning");
             } else if (data.status === 'error') {
                 clearInterval(authCheckInterval);
@@ -675,6 +703,47 @@ async function submit2FA() {
     }
 }
 
+async function cancelAuth() {
+    if (authCancelInFlight) return;
+
+    const name = currentAuthName || document.getElementById('account-name').value.trim();
+    if (!name) {
+        showToast("Имя аккаунта не задано", "warning");
+        return;
+    }
+    if (!confirm(`Отменить авторизацию для ${name} и освободить сессию?`)) return;
+
+    authCancelInFlight = true;
+    try {
+        const res = await fetch('/api/accounts/auth/cancel', {
+            method: 'POST',
+            body: JSON.stringify({ name })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast("Авторизация отменена", "success");
+        } else {
+            showToast(data.message || "Ошибка отмены", "error");
+        }
+    } catch (e) {
+        showToast("Ошибка сети при отмене", "error");
+    } finally {
+        authCancelInFlight = false;
+        if (authCheckInterval) clearInterval(authCheckInterval);
+        currentAuthName = null;
+        // Reset UI back to initial state (keep current tab).
+        document.getElementById('qr-container').style.display = 'none';
+        document.getElementById('2fa-container').style.display = 'none';
+        document.getElementById('auth-status').innerText = "";
+        document.getElementById('auth-actions').style.display = 'block';
+        document.getElementById('phone-code-group').style.display = 'none';
+        document.getElementById('btn-phone-start').style.display = 'block';
+        document.getElementById('btn-phone-verify').style.display = 'none';
+        setAuthCancelVisible(false);
+        updateIcons();
+    }
+}
+
 function openModal() {
     document.getElementById('addModal').style.display = 'flex';
     document.getElementById('auth-status').innerText = "";
@@ -689,12 +758,14 @@ function openModal() {
 
     // Hide 2FA
     document.getElementById('2fa-container').style.display = 'none';
+    setAuthCancelVisible(false);
 
     updateIcons();
 }
 function closeModal() {
     document.getElementById('addModal').style.display = 'none';
     if (authCheckInterval) clearInterval(authCheckInterval);
+    setAuthCancelVisible(false);
 }
 
 // --- History & Lists & Systemd ---
@@ -824,9 +895,7 @@ async function fetchMainStatus() {
 
 async function controlMain(action) {
     const btn = event.target.closest('.btn');
-    const oldHtml = btn.innerHTML;
-    btn.innerHTML = "⏳";
-    btn.disabled = true;
+    setButtonLoading(btn, true);
 
     try {
         const response = await fetch(`/api/main/${action}`, { method: 'POST' });
@@ -839,8 +908,7 @@ async function controlMain(action) {
     } catch (err) { showToast("Сбой сети при управлении", "error"); }
     finally {
         setTimeout(() => {
-            btn.innerHTML = oldHtml;
-            btn.disabled = false;
+            setButtonLoading(btn, false);
             fetchMainStatus();
             updateIcons();
         }, 1000);
@@ -885,8 +953,8 @@ function initCharts() {
     const cpuCtx = document.getElementById('cpuChart').getContext('2d');
     const ramCtx = document.getElementById('ramChart').getContext('2d');
 
-    cpuChart = new Chart(cpuCtx, chartOptions('#8B5CF6'));
-    ramChart = new Chart(ramCtx, chartOptions('#3B82F6'));
+    cpuChart = new Chart(cpuCtx, chartOptions('#22d3ee'));
+    ramChart = new Chart(ramCtx, chartOptions('#34d399'));
 
     const tokenCtx = document.getElementById('tokenChart').getContext('2d');
     tokenChart = new Chart(tokenCtx, {

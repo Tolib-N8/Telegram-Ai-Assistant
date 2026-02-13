@@ -628,7 +628,7 @@ class TelegramAssistant:
     async def is_admin(self, event):
         """Проверка, является ли отправитель владельцем аккаунта."""
         sender_id = event.sender_id
-        return sender_id == self.my_id or sender_id == 'me'
+        return sender_id == self.my_id
 
     async def refresh_contacts(self):
         while True:
@@ -704,13 +704,73 @@ class AccountManager:
         self.prompt = os.getenv('GEMINI_PROMPT', "Ты — ассистент.")
         
         # Для веб-авторизации
-        self.active_auths = {} # session_name: {client, qr, status}
+        # session_name: {client, qr|phone_code_hash, status, started_at, type, bot_instance, ...}
+        # Important: any connected Telethon client keeps the sqlite session file open.
+        # If we don't disconnect it explicitly, the supervisor may later fail with "database is locked".
+        self.active_auths = {}
         
         # Активные экземпляры ботов
         self.bots = {} # session_name: TelegramAssistant
 
     def _reload_config(self):
         self.config = load_json_file(MANAGER_CONFIG, {"accounts": []})
+
+    def _auth_marker_path(self, name: str) -> Path:
+        # Marker used to coordinate between dashboard process and supervisor process.
+        return (ACCOUNTS_DIR / name / "auth_in_progress.json")
+
+    def _write_auth_marker(self, name: str, auth_type: str):
+        try:
+            marker = self._auth_marker_path(name)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            atomic_save_json(
+                marker,
+                {
+                    "started_at": time.time(),
+                    "pid": os.getpid(),
+                    "type": auth_type,
+                },
+            )
+        except Exception:
+            pass
+
+    def _remove_auth_marker(self, name: str):
+        try:
+            marker = self._auth_marker_path(name)
+            if marker.exists():
+                marker.unlink()
+        except Exception:
+            pass
+
+    async def _safe_disconnect(self, client):
+        """Best-effort disconnect. Prevents sqlite session locks lingering in the dashboard process."""
+        if not client:
+            return
+        try:
+            await client.disconnect()
+        except (Exception, RuntimeError, asyncio.CancelledError):
+            pass
+
+    async def _cleanup_auth(self, name):
+        """Disconnect and remove an auth session if it exists."""
+        auth = self.active_auths.get(name)
+        if not auth:
+            return
+        client = auth.get("client")
+        await self._safe_disconnect(client)
+        self.active_auths.pop(name, None)
+        self._remove_auth_marker(name)
+
+    async def _cleanup_stale_auths(self, ttl_seconds=300):
+        """Disconnect stale auth sessions to avoid session DB locks."""
+        now = time.time()
+        stale = []
+        for name, auth in list(self.active_auths.items()):
+            started_at = auth.get("started_at") or 0
+            if started_at and (now - started_at) > ttl_seconds:
+                stale.append(name)
+        for name in stale:
+            await self._cleanup_auth(name)
 
     def save_config(self):
         atomic_save_json(MANAGER_CONFIG, self.config)
@@ -741,6 +801,7 @@ class AccountManager:
 
     async def add_account_web_start(self, name):
         """Начало процесса QR-авторизации для веба"""
+        await self._cleanup_stale_auths()
         self._reload_config()
         if any(acc['name'] == name for acc in self.config['accounts']):
             return {"status": "error", "message": "Account exists"}
@@ -749,14 +810,18 @@ class AccountManager:
         api_hash = os.getenv('API_HASH')
         
         bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
-        await bot.client.connect()
+        try:
+            await bot.client.connect()
+        except Exception as e:
+            await self._safe_disconnect(bot.client)
+            return {"status": "error", "message": str(e)}
         
         # Если уже авторизован (сессия жива)
         if await bot.client.is_user_authorized():
             if not any(acc['name'] == name for acc in self.config['accounts']):
                 self.config['accounts'].append({"name": name})
                 self.save_config()
-            await bot.client.disconnect()
+            await self._safe_disconnect(bot.client)
             return {"status": "success", "message": "Already authorized"}
 
         # Начинаем QR
@@ -765,12 +830,16 @@ class AccountManager:
             "client": bot.client,
             "qr": qr,
             "status": "waiting_qr",
-            "bot_instance": bot
+            "bot_instance": bot,
+            "started_at": time.time(),
+            "type": "qr",
         }
+        self._write_auth_marker(name, "qr")
         return {"status": "qr", "url": qr.url}
 
     async def add_account_web_check(self, name):
         """Проверка статуса QR-авторизации"""
+        await self._cleanup_stale_auths()
         self._reload_config()
         if name not in self.active_auths:
             return {"status": "not_found"}
@@ -785,7 +854,7 @@ class AccountManager:
                 if not any(acc['name'] == name for acc in self.config['accounts']):
                     self.config['accounts'].append({"name": name})
                     self.save_config()
-                del self.active_auths[name]
+                await self._cleanup_auth(name)
                 return {"status": "success", "user": user.first_name}
         except asyncio.TimeoutError:
             return {"status": "waiting"}
@@ -794,12 +863,14 @@ class AccountManager:
             if isinstance(e, SessionPasswordNeededError):
                 auth['status'] = 'waiting_2fa'
                 return {"status": "2fa_needed"}
+            await self._cleanup_auth(name)
             return {"status": "error", "message": str(e)}
         
         return {"status": "waiting"}
 
     async def add_account_web_2fa(self, name, password):
         """Ввод 2FA пароля для веба"""
+        await self._cleanup_stale_auths()
         self._reload_config()
         if name not in self.active_auths:
             return {"status": "not_found"}
@@ -817,13 +888,15 @@ class AccountManager:
                 if not any(acc['name'] == name for acc in self.config['accounts']):
                     self.config['accounts'].append({"name": name})
                     self.save_config()
-                del self.active_auths[name]
+                await self._cleanup_auth(name)
                 return {"status": "success", "user": user.first_name}
         except Exception as e:
+            await self._cleanup_auth(name)
             return {"status": "error", "message": str(e)}
 
     async def add_account_phone_start(self, name, phone):
         """Start phone authentication"""
+        await self._cleanup_stale_auths()
         self._reload_config()
         if any(acc['name'] == name for acc in self.config['accounts']):
             return {"status": "error", "message": "Account exists"}
@@ -832,22 +905,17 @@ class AccountManager:
         api_hash = os.getenv('API_HASH')
         
         bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
-        # Wait, in main.py it is self.ai_limiter globally? No, looking at file content:
-        # self.ai_clients = ai_clients
-        # self.ai_limiter = AIRateLimiter(rpm_limit=15) - wait, this is inside TelegramAssistant.
-        # AccountManager in main.py doesn't seem to pass shared_limiter in the original code I viewed earlier?
-        # Let's check init of TelegramAssistant in add_account_web_start
-        # Line 596: bot = TelegramAssistant(name, api_id, api_hash, self.ai_clients, self.prompt)
-        # It seems I need to match the signature.
-        
-        bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
-        await bot.client.connect()
+        try:
+            await bot.client.connect()
+        except Exception as e:
+            await self._safe_disconnect(bot.client)
+            return {"status": "error", "message": str(e)}
         
         if await bot.client.is_user_authorized():
             if not any(acc['name'] == name for acc in self.config['accounts']):
                 self.config['accounts'].append({"name": name})
                 self.save_config()
-            await bot.client.disconnect()
+            await self._safe_disconnect(bot.client)
             return {"status": "success", "message": "Already authorized"}
             
         try:
@@ -858,15 +926,18 @@ class AccountManager:
                 "phone_code_hash": sent_code.phone_code_hash,
                 "type": "phone",
                 "status": "waiting_code",
-                "bot_instance": bot
+                "bot_instance": bot,
+                "started_at": time.time(),
             }
+            self._write_auth_marker(name, "phone")
             return {"status": "sent"}
         except Exception as e:
-            await bot.client.disconnect()
+            await self._safe_disconnect(bot.client)
             return {"status": "error", "message": str(e)}
 
     async def add_account_phone_verify(self, name, code, phone):
         """Verify phone code"""
+        await self._cleanup_stale_auths()
         self._reload_config()
         if name not in self.active_auths:
              return {"status": "error", "message": "Session expired"}
@@ -881,12 +952,13 @@ class AccountManager:
                 if not any(acc['name'] == name for acc in self.config['accounts']):
                     self.config['accounts'].append({"name": name})
                     self.save_config()
-                del self.active_auths[name]
+                await self._cleanup_auth(name)
                 return {"status": "success", "user": user.first_name}
         except Exception as e:
             from telethon.errors import SessionPasswordNeededError
             if isinstance(e, SessionPasswordNeededError):
                  return {"status": "2fa_needed"}
+            await self._cleanup_auth(name)
             return {"status": "error", "message": str(e)}
         return {"status": "error", "message": "Unknown error"}
 
@@ -913,6 +985,18 @@ class AccountManager:
                 # 2. Запускаем новые аккаунты
                 for name in current_names:
                     if name not in running_tasks:
+                        # If the dashboard is currently authenticating this account, the session sqlite file is
+                        # very likely to be locked. Skip starting until auth completes (marker removed).
+                        marker = self._auth_marker_path(name)
+                        if marker.exists():
+                            marker_data = load_json_file(marker, {})
+                            started_at = marker_data.get("started_at", 0) or 0
+                            # If marker is stale, remove it and try starting.
+                            if started_at and (time.time() - started_at) < 15 * 60:
+                                logger.info(f"⏳ [{name}] Авторизация в процессе (Dashboard). Запуск отложен.")
+                                continue
+                            self._remove_auth_marker(name)
+
                         api_id = os.getenv('API_ID')
                         api_hash = os.getenv('API_HASH')
                         bot = TelegramAssistant(name, api_id, api_hash, self.ai_client, self.prompt)
