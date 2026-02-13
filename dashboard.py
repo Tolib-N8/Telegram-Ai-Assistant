@@ -82,7 +82,8 @@ async def _startup_background_cleanup():
 
     asyncio.create_task(_loop())
 
-@app.get("/login", response_class=HTMLResponse)
+# Allow HEAD so `curl -I http://127.0.0.1:8000/login` works and basic health probes don't fail.
+@app.api_route("/login", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def login_page(user: str = Depends(get_session_user)):
     if user:
         return RedirectResponse(url="/")
@@ -765,4 +766,6 @@ if __name__ == "__main__":
     else:
         print("WARNING: No SSL certificates found. Passkeys will not work on remote devices.")
     
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=True, **ssl_config)
+    # IMPORTANT: `reload=True` is dev-only. In production it can cause restarts/resets which break Cloudflare Tunnel.
+    reload = str(os.getenv("DASHBOARD_RELOAD", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    uvicorn.run("dashboard:app", host="0.0.0.0", port=8000, reload=reload, **ssl_config)

@@ -72,6 +72,93 @@
 
 ---
 
+## 🚀 Деплой на VPS (Ubuntu) + systemd
+
+1. **Обновить код на сервере**:
+   ```bash
+   cd ~/Telegram-Ai-Assistant/Telegram-Ai-Assistant
+   git pull
+   ```
+
+2. **Виртуальное окружение и зависимости**:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+3. **systemd для Dashboard (пример)**:
+   Создайте файл `/etc/systemd/system/tg-assistant-dashboard.service`:
+   ```ini
+   [Unit]
+   Description=Telegram AI Assistant Dashboard
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/Telegram-Ai-Assistant/Telegram-Ai-Assistant
+   EnvironmentFile=/home/ubuntu/Telegram-Ai-Assistant/Telegram-Ai-Assistant/.env
+   ExecStart=/home/ubuntu/Telegram-Ai-Assistant/Telegram-Ai-Assistant/.venv/bin/python dashboard.py
+   Restart=always
+   RestartSec=3
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   Применить:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now tg-assistant-dashboard.service
+   sudo systemctl status tg-assistant-dashboard.service --no-pager
+   ```
+
+4. **(Опционально) systemd для Supervisor (пример)**:
+   Создайте `/etc/systemd/system/tg-assistant.service`:
+   ```ini
+   [Unit]
+   Description=Telegram AI Assistant Supervisor
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/Telegram-Ai-Assistant/Telegram-Ai-Assistant
+   EnvironmentFile=/home/ubuntu/Telegram-Ai-Assistant/Telegram-Ai-Assistant/.env
+   ExecStart=/home/ubuntu/Telegram-Ai-Assistant/Telegram-Ai-Assistant/.venv/bin/python main.py --daemon
+   Restart=always
+   RestartSec=10
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+---
+
+## 🌐 Cloudflare Tunnel (quick tunnel) и ошибка 1033
+
+Если вы запускаете cloudflared как **quick tunnel** (`cloudflared tunnel --url http://localhost:8000`), то:
+- при каждом рестарте cloudflared создается **новый** `https://*.trycloudflare.com` URL
+- старый URL перестает работать и может показывать **Error 1033**
+
+Текущий URL можно увидеть так:
+```bash
+sudo journalctl -u cloudflared-dashboard.service -n 50 --no-pager
+```
+
+Для стабильного домена используйте **named tunnel** (Cloudflare account + `config.yml`), а не quick tunnel.
+
+---
+
+## 🧩 Если “на сервере криво”, а на ПК нормально
+
+Чаще всего это кеш **Service Worker** (PWA):
+- откройте сайт в приватном окне (Incognito) и сравните
+- либо удалите “данные сайта” (storage) для домена (особенно `trycloudflare.com`)
+
+Также убедитесь, что на сервере реально обновлен код (`git pull`) и перезапущены сервисы dashboard/supervisor.
+
 ## 🔐 Переменные окружения (.env)
 
 Обязательные:
