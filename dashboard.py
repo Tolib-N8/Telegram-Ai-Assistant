@@ -104,7 +104,8 @@ def _is_https(request: Request) -> bool:
 
 
 def _set_session_cookie(response: Response, username: str, request: Request):
-    token = serializer.dumps({"user": username, "ts": time.time()})
+    rec = get_user_record(username) or {"role": "viewer"}
+    token = serializer.dumps({"user": username, "role": rec.get("role") or "viewer", "ts": time.time()})
     max_age = int(os.getenv("DASHBOARD_SESSION_MAX_AGE", str(60 * 60 * 24 * 7)))  # 7 days
     secure = str(os.getenv("DASHBOARD_COOKIE_SECURE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
     secure = secure or _is_https(request)
@@ -287,19 +288,64 @@ def get_session_user(session: str = Depends(session_cookie)):
         return None
     try:
         data = serializer.loads(session)
-        return data.get("user")
+        return {
+            "user": data.get("user"),
+            "role": data.get("role") or "admin",
+        }
     except:
         return None
 
-def authenticate(user: str = Depends(get_session_user)):
-    if not user:
+def authenticate(session: dict = Depends(get_session_user)):
+    if not session or not session.get("user"):
         # Для API возвращаем 401, для страниц можно редирект, 
         # но FastAPI Depends лучше работает с исключениями
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return user
+    return session
 
-async def optional_authenticate(user: str = Depends(get_session_user)):
-    return user
+def require_admin(session: dict = Depends(authenticate)):
+    if (session.get("role") or "viewer") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return session
+
+async def optional_authenticate(session: dict = Depends(get_session_user)):
+    return session
+
+
+def _parse_users_env():
+    """
+    Extra users in env:
+      DASHBOARD_USERS="user1:pass1:viewer,user2:pass2:viewer"
+    Role defaults to viewer.
+    """
+    raw = str(os.getenv("DASHBOARD_USERS", "")).strip()
+    users = {}
+    if not raw:
+        return users
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        seg = part.split(":")
+        if len(seg) < 2:
+            continue
+        u = seg[0].strip()
+        p = seg[1]
+        r = (seg[2].strip().lower() if len(seg) >= 3 else "viewer") or "viewer"
+        if u and p:
+            users[u] = {"password": p, "role": "admin" if r == "admin" else "viewer"}
+    return users
+
+
+def get_user_record(username: str):
+    admin_user = os.getenv("DASHBOARD_USER", "admin")
+    admin_pass = os.getenv("DASHBOARD_PASSWORD")
+    if not admin_pass:
+        admin_pass = secrets.token_urlsafe(16)
+        logging.warning("DASHBOARD_PASSWORD is not set. Generated a random one for this run.")
+
+    users = {admin_user: {"password": admin_pass, "role": "admin"}}
+    users.update(_parse_users_env())
+    return users.get(username)
 
 # Монтируем статику (саму папку статики не защищаем, чтобы CSS/JS грузились до логина? 
 # Нет, лучше защитить всё приложение)
@@ -347,14 +393,8 @@ async def api_login(req: Request):
     username = data.get("username")
     password = data.get("password")
     
-    correct_username = os.getenv("DASHBOARD_USER", "admin")
-    # Avoid predictable defaults. If not configured, generate an ephemeral password and warn.
-    correct_password = os.getenv("DASHBOARD_PASSWORD")
-    if not correct_password:
-        correct_password = secrets.token_urlsafe(16)
-        logging.warning("DASHBOARD_PASSWORD is not set. Generated a random one for this run.")
-    
-    if username == correct_username and password == correct_password:
+    rec = get_user_record(username or "")
+    if rec and secrets.compare_digest(str(password or ""), str(rec.get("password") or "")):
         response = JSONResponse({"status": "success"})
         _set_session_cookie(response, username, req)
         return response
@@ -369,13 +409,18 @@ async def api_logout(req: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(user: str = Depends(get_session_user)):
-    if not user:
+    if not user or not user.get("user"):
         return RedirectResponse(url="/login")
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
+
+@app.get("/api/me")
+async def me(session: dict = Depends(authenticate)):
+    return {"user": session.get("user"), "role": session.get("role") or "viewer", "version": VERSION}
+
 @app.get("/api/auth/register/options")
-async def register_options(request: Request, user: str = Depends(authenticate)):
+async def register_options(request: Request, user: dict = Depends(authenticate)):
     ip = _get_client_ip(request)
     ok, retry_after = AUTH_RL.check(f"{ip}:passkey_register_options")
     if not ok:
@@ -389,7 +434,8 @@ async def register_options(request: Request, user: str = Depends(authenticate)):
     origin = os.getenv("EXPECTED_ORIGIN") or str(request.base_url).rstrip('/')
     rp_id = os.getenv("RP_ID") or request.url.hostname or "localhost"
 
-    options = auth_utils.get_webauthn_registration_options(user, user, rp_id=rp_id)
+    username = user.get("user")
+    options = auth_utils.get_webauthn_registration_options(username, username, rp_id=rp_id)
     # Convert to JSON-friendly structure and store challenge (string) in memory
     options_json = auth_utils.options_to_json(options)
     # options_to_json may return a JSON string or a dict depending on library version
@@ -399,7 +445,7 @@ async def register_options(request: Request, user: str = Depends(authenticate)):
         except Exception:
             pass
 
-    webauthn_challenges[user] = {
+    webauthn_challenges[username] = {
         'challenge': options_json.get('challenge') if isinstance(options_json, dict) else None,
         'expected_origin': origin,
         'expected_rp_id': rp_id,
@@ -407,7 +453,7 @@ async def register_options(request: Request, user: str = Depends(authenticate)):
     return JSONResponse(options_json)
 
 @app.post("/api/auth/register/verify")
-async def register_verify(req: Request, user: str = Depends(authenticate)):
+async def register_verify(req: Request, user: dict = Depends(authenticate)):
     ip = _get_client_ip(req)
     ok, retry_after = AUTH_RL.check(f"{ip}:passkey_register_verify")
     if not ok:
@@ -418,7 +464,8 @@ async def register_verify(req: Request, user: str = Depends(authenticate)):
         )
 
     data = await req.json()
-    stored = webauthn_challenges.get(user)
+    username = user.get("user")
+    stored = webauthn_challenges.get(username)
     if not stored:
         return JSONResponse({"status": "error", "message": "Challenge not found"}, status_code=400)
 
@@ -427,10 +474,10 @@ async def register_verify(req: Request, user: str = Depends(authenticate)):
         data['_expected_origin'] = stored.get('expected_origin')
         data['_expected_rp_id'] = stored.get('expected_rp_id')
 
-    success = auth_utils.verify_webauthn_registration(user, data, stored.get('challenge'))
+    success = auth_utils.verify_webauthn_registration(username, data, stored.get('challenge'))
     if success:
         # One-time use challenge
-        webauthn_challenges.pop(user, None)
+        webauthn_challenges.pop(username, None)
         return {"status": "success"}
     return JSONResponse({"status": "error", "message": "Verification failed"}, status_code=400)
 
@@ -523,7 +570,7 @@ async def login_verify(req: Request):
     return JSONResponse({"status": "error", "message": "Verification failed"}, status_code=401)
 
 @app.get("/api/status")
-async def get_status(user: str = Depends(authenticate)):
+async def get_status(session: dict = Depends(authenticate)):
     import time
     accounts = []
     config = load_json_file(MANAGER_CONFIG, {"accounts": []})
@@ -552,7 +599,7 @@ async def get_status(user: str = Depends(authenticate)):
     return {"accounts": accounts}
 
 @app.post("/api/accounts/auth/start")
-async def auth_start(req: Request, username: str = Depends(authenticate)):
+async def auth_start(req: Request, session: dict = Depends(require_admin)):
     data = await req.json()
     name = data.get("name")
     if not name:
@@ -576,12 +623,12 @@ async def auth_start(req: Request, username: str = Depends(authenticate)):
     return result
 
 @app.get("/api/accounts/auth/check/{name}")
-async def auth_check(name: str, username: str = Depends(authenticate)):
+async def auth_check(name: str, session: dict = Depends(require_admin)):
     result = await manager.add_account_web_check(name)
     return result
 
 @app.post("/api/accounts/auth/2fa")
-async def auth_2fa(req: Request, username: str = Depends(authenticate)):
+async def auth_2fa(req: Request, session: dict = Depends(require_admin)):
     data = await req.json()
     name = data.get("name")
     password = data.get("password")
@@ -589,7 +636,7 @@ async def auth_2fa(req: Request, username: str = Depends(authenticate)):
     return result
 
 @app.post("/api/accounts/auth/cancel")
-async def auth_cancel(req: Request, username: str = Depends(authenticate)):
+async def auth_cancel(req: Request, session: dict = Depends(require_admin)):
     data = await req.json()
     name = data.get("name")
     if not name:
@@ -605,7 +652,7 @@ async def auth_cancel(req: Request, username: str = Depends(authenticate)):
     return {"status": "success"}
 
 @app.post("/api/accounts/auth/phone/start")
-async def auth_phone_start(req: Request, username: str = Depends(authenticate)):
+async def auth_phone_start(req: Request, session: dict = Depends(require_admin)):
     data = await req.json()
     name = data.get("name")
     phone = data.get("phone")
@@ -621,7 +668,7 @@ async def auth_phone_start(req: Request, username: str = Depends(authenticate)):
     return result
 
 @app.post("/api/accounts/auth/phone/verify")
-async def auth_phone_verify(req: Request, username: str = Depends(authenticate)):
+async def auth_phone_verify(req: Request, session: dict = Depends(require_admin)):
     data = await req.json()
     name = data.get("name")
     code = data.get("code")
@@ -631,7 +678,7 @@ async def auth_phone_verify(req: Request, username: str = Depends(authenticate))
 
 # --- Global Config Editor ---
 @app.get("/api/config")
-async def get_global_config(username: str = Depends(authenticate)):
+async def get_global_config(session: dict = Depends(require_admin)):
     env_file = Path(".env")
     if not env_file.exists():
         return Response(content="", media_type="text/plain")
@@ -642,7 +689,7 @@ async def get_global_config(username: str = Depends(authenticate)):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/config")
-async def save_global_config(req: Request, username: str = Depends(authenticate)):
+async def save_global_config(req: Request, session: dict = Depends(require_admin)):
     try:
         body = await req.body()
         content = body.decode("utf-8")
@@ -655,7 +702,7 @@ async def save_global_config(req: Request, username: str = Depends(authenticate)
 
 # --- AI Playground ---
 @app.post("/api/ai/test")
-async def ai_test(req: Request, username: str = Depends(authenticate)):
+async def ai_test(req: Request, session: dict = Depends(require_admin)):
     try:
         data = await req.json()
         prompt = data.get('prompt')
@@ -687,7 +734,7 @@ async def ai_test(req: Request, username: str = Depends(authenticate)):
 
 
 @app.get("/api/logs")
-async def get_logs(limit: int = 100, username: str = Depends(authenticate)):
+async def get_logs(limit: int = 100, session: dict = Depends(authenticate)):
     log_file = Path("bot.log")
     if not log_file.exists():
         return {"logs": ["Log file not found."]}
@@ -759,7 +806,7 @@ async def websocket_logs(websocket: WebSocket):
             pass
 
 @app.get("/api/logs/export")
-async def export_logs(username: str = Depends(authenticate)):
+async def export_logs(session: dict = Depends(authenticate)):
     from fastapi.responses import FileResponse
     log_file = Path("bot.log")
     if not log_file.exists():
@@ -772,7 +819,7 @@ async def export_logs(username: str = Depends(authenticate)):
     )
 
 @app.post("/api/logs/clear")
-async def clear_logs(username: str = Depends(authenticate)):
+async def clear_logs(session: dict = Depends(require_admin)):
     log_file = Path("bot.log")
     try:
         with open(log_file, "w", encoding="utf-8") as f:
@@ -782,7 +829,7 @@ async def clear_logs(username: str = Depends(authenticate)):
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/ai/token-stats")
-async def get_token_stats(username: str = Depends(authenticate)):
+async def get_token_stats(session: dict = Depends(authenticate)):
     """Агрегация статистики использования токенов со всех аккаунтов."""
     aggregated = {} # date: {input, output}
     
@@ -810,7 +857,7 @@ async def get_token_stats(username: str = Depends(authenticate)):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/accounts/reset/{name}")
-async def reset_account(name: str, username: str = Depends(authenticate)):
+async def reset_account(name: str, session: dict = Depends(require_admin)):
     acc_dir = ACCOUNTS_DIR / name
     if not acc_dir.exists():
         raise HTTPException(status_code=404, detail="Account not found")
@@ -826,7 +873,7 @@ async def reset_account(name: str, username: str = Depends(authenticate)):
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/accounts/restart/{name}")
-async def restart_account(name: str, username: str = Depends(authenticate)):
+async def restart_account(name: str, session: dict = Depends(require_admin)):
     """
     Request a restart of a single account inside the supervisor (main.py).
     Implemented via a cross-process marker file consumed by AccountManager.run_all().
@@ -849,7 +896,7 @@ async def restart_account(name: str, username: str = Depends(authenticate)):
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/accounts/history/{name}")
-async def get_account_history(name: str, username: str = Depends(authenticate)):
+async def get_account_history(name: str, session: dict = Depends(authenticate)):
     acc_dir = ACCOUNTS_DIR / name
     history_file = acc_dir / "history.json"
     if not history_file.exists():
@@ -871,7 +918,7 @@ async def get_account_history(name: str, username: str = Depends(authenticate)):
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/accounts/lists/{name}")
-async def get_account_lists(name: str, username: str = Depends(authenticate)):
+async def get_account_lists(name: str, session: dict = Depends(require_admin)):
     acc_dir = ACCOUNTS_DIR / name
     return {
         "whitelist": load_json_file(acc_dir / "whitelist.json", []),
@@ -883,7 +930,7 @@ class ListUpdate(BaseModel):
     blacklist: list
 
 @app.post("/api/accounts/lists/{name}")
-async def save_account_lists(name: str, data: ListUpdate, username: str = Depends(authenticate)):
+async def save_account_lists(name: str, data: ListUpdate, session: dict = Depends(require_admin)):
     acc_dir = ACCOUNTS_DIR / name
     from main import atomic_save_json
     try:
@@ -894,7 +941,7 @@ async def save_account_lists(name: str, data: ListUpdate, username: str = Depend
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/accounts/settings/{name}")
-async def get_account_settings(name: str, username: str = Depends(authenticate)):
+async def get_account_settings(name: str, session: dict = Depends(require_admin)):
     acc_dir = ACCOUNTS_DIR / name
     if not acc_dir.exists():
         raise HTTPException(status_code=404, detail="Account not found")
@@ -915,7 +962,7 @@ async def get_account_settings(name: str, username: str = Depends(authenticate))
     return default_settings
 
 @app.post("/api/accounts/settings/{name}")
-async def save_account_settings(name: str, req: Request, username: str = Depends(authenticate)):
+async def save_account_settings(name: str, req: Request, session: dict = Depends(require_admin)):
     acc_dir = ACCOUNTS_DIR / name
     if not acc_dir.exists():
         raise HTTPException(status_code=404, detail="Account not found")
@@ -931,7 +978,7 @@ async def save_account_settings(name: str, req: Request, username: str = Depends
         return {"status": "error", "message": str(e)}
 
 @app.delete("/api/accounts/{name}")
-async def delete_account(name: str, username: str = Depends(authenticate)):
+async def delete_account(name: str, session: dict = Depends(require_admin)):
     config = load_json_file(MANAGER_CONFIG, {"accounts": []})
     new_accounts = [a for a in config['accounts'] if a['name'] != name]
     
@@ -968,7 +1015,7 @@ def find_main_process():
     return None
 
 @app.get("/api/system/stats")
-async def get_system_stats(username: str = Depends(authenticate)):
+async def get_system_stats(session: dict = Depends(authenticate)):
     try:
         cpu = psutil.cpu_percent(interval=None)
         ram = psutil.virtual_memory().percent
@@ -977,7 +1024,7 @@ async def get_system_stats(username: str = Depends(authenticate)):
         return {"cpu": 0, "ram": 0, "error": str(e)}
 
 @app.get("/api/main/status")
-async def get_main_status(username: str = Depends(authenticate)):
+async def get_main_status(session: dict = Depends(authenticate)):
     proc = find_main_process()
     if proc:
         try:
@@ -993,7 +1040,7 @@ async def get_main_status(username: str = Depends(authenticate)):
     return {"running": False}
 
 @app.post("/api/main/start")
-async def start_main(username: str = Depends(authenticate)):
+async def start_main(session: dict = Depends(require_admin)):
     if find_main_process():
         return {"status": "error", "message": "Бот уже запущен"}
 
@@ -1016,7 +1063,7 @@ async def start_main(username: str = Depends(authenticate)):
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/main/stop")
-async def stop_main(username: str = Depends(authenticate)):
+async def stop_main(session: dict = Depends(require_admin)):
     proc = find_main_process()
     if not proc:
         return {"status": "error", "message": "Бот не запущен"}
@@ -1036,13 +1083,13 @@ async def stop_main(username: str = Depends(authenticate)):
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/main/restart")
-async def restart_main(username: str = Depends(authenticate)):
+async def restart_main(session: dict = Depends(require_admin)):
     await stop_main()
     await asyncio.sleep(2)
     return await start_main()
 
 @app.get("/api/system/systemd")
-async def get_systemd_config(username: str = Depends(authenticate)):
+async def get_systemd_config(session: dict = Depends(require_admin)):
     import os
     working_dir = os.getcwd()
     user = os.getlogin() if hasattr(os, 'getlogin') else 'root'

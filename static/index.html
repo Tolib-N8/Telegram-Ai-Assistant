@@ -32,19 +32,19 @@
             </div>
         </div>
         <div class="top-actions">
-            <button class="btn btn-ghost" onclick="showSystemd()">
+            <button class="btn btn-ghost admin-only" onclick="showSystemd()">
                 <i data-lucide="cog"></i> <span>Systemd</span>
             </button>
-            <button class="btn btn-icon" onclick="openConfig()" title="Конфиг" aria-label="Конфиг">
+            <button class="btn btn-icon admin-only" onclick="openConfig()" title="Конфиг" aria-label="Конфиг">
                 <i data-lucide="settings-2"></i>
             </button>
-            <button class="btn btn-icon" onclick="registerPasskey()" title="Passkey" aria-label="Passkey">
+            <button class="btn btn-icon admin-only" onclick="registerPasskey()" title="Passkey" aria-label="Passkey">
                 <i data-lucide="fingerprint"></i>
             </button>
             <button class="btn btn-icon" onclick="logout()" title="Выйти" aria-label="Выйти">
                 <i data-lucide="log-out"></i>
             </button>
-            <button class="btn btn-primary" onclick="openModal()">
+            <button class="btn btn-primary admin-only" onclick="openModal()">
                 <i data-lucide="plus"></i> <span>Добавить аккаунт</span>
             </button>
         </div>
@@ -67,13 +67,13 @@
                     </div>
                 </div>
                 <div class="system__actions">
-                    <button class="btn" id="btn-main-start" onclick="controlMain('start')">
+                    <button class="btn admin-only" id="btn-main-start" onclick="controlMain('start')">
                         <i data-lucide="play"></i> <span>Старт</span>
                     </button>
-                    <button class="btn" id="btn-main-restart" onclick="controlMain('restart')">
+                    <button class="btn admin-only" id="btn-main-restart" onclick="controlMain('restart')">
                         <i data-lucide="refresh-cw"></i> <span>Перезагрузка</span>
                     </button>
-                    <button class="btn btn-danger" id="btn-main-stop" onclick="controlMain('stop')">
+                    <button class="btn btn-danger admin-only" id="btn-main-stop" onclick="controlMain('stop')">
                         <i data-lucide="power"></i> <span>Выключить</span>
                     </button>
                 </div>
@@ -113,7 +113,7 @@
                     <button class="btn btn-ghost" onclick="exportLogs()">
                         <i data-lucide="download"></i> <span>Экспорт</span>
                     </button>
-                    <button class="btn btn-danger" onclick="clearLogs()">
+                    <button class="btn btn-danger admin-only" onclick="clearLogs()">
                         <i data-lucide="trash-2"></i> <span>Очистить</span>
                     </button>
                 </div>

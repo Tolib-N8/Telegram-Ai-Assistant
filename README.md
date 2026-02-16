@@ -175,6 +175,7 @@ sudo journalctl -u cloudflared-dashboard.service -n 50 --no-pager
 
 Рекомендуемые:
 - `DASHBOARD_USER`, `DASHBOARD_PASSWORD` (логин/пароль в Dashboard)
+- `DASHBOARD_USERS` (доп. пользователи: `user:pass:viewer,user2:pass2:viewer`)
 - `DASHBOARD_SECRET` (подпись cookie-сессий)
 - `GEMINI_MODEL` (например: `gemini-2.5-flash`)
 

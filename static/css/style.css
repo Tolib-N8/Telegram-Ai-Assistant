@@ -57,6 +57,10 @@ body {
         radial-gradient(circle at 55% 40%, rgba(251, 113, 133, 0.05) 0%, transparent 55%);
 }
 
+.admin-only.is-hidden {
+    display: none !important;
+}
+
 /* Base Mesh Background */
 .bg-mesh {
     position: fixed;

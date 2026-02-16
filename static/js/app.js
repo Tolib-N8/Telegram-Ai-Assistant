@@ -8,6 +8,7 @@ let settingsAiEnabled = true;
 let currentAuthName = null;
 let authCheckInterval = null;
 let authCancelInFlight = false;
+let currentUserRole = 'admin';
 
 let chipsLastRenderAt = 0;
 const LOG_CHIPS = [
@@ -62,6 +63,7 @@ function showToast(message, type = 'info') {
 // --- Data Fetching ---
 // --- Config Editor ---
 async function openConfig() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     document.getElementById('modal-config').style.display = 'flex';
     try {
         const res = await fetch('/api/config');
@@ -77,6 +79,7 @@ function closeConfig() {
 }
 
 async function saveConfig() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const editor = document.getElementById('config-editor');
     const content = editor.value;
 
@@ -97,6 +100,7 @@ async function saveConfig() {
 
 // --- AI Playground ---
 function openAiPlayground() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     document.getElementById('drawer-ai').style.display = 'flex';
 }
 
@@ -105,6 +109,7 @@ function closeAiPlayground() {
 }
 
 async function runAiTest() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const prompt = document.getElementById('ai-test-prompt').value;
     const model = document.getElementById('ai-test-model').value;
     const resultContainer = document.getElementById('ai-test-result-container');
@@ -144,6 +149,18 @@ async function fetchStatus() {
     } catch (err) {
         console.error("Error fetching status:", err);
     }
+}
+
+async function fetchMe() {
+    try {
+        const res = await fetch('/api/me');
+        if (!res.ok) return;
+        const data = await res.json();
+        currentUserRole = data.role || 'viewer';
+
+        const adminEls = document.querySelectorAll('.admin-only');
+        adminEls.forEach(el => el.classList.toggle('is-hidden', currentUserRole !== 'admin'));
+    } catch (e) { }
 }
 
 // --- WebSocket Log Logic ---
@@ -357,6 +374,7 @@ function applyLogFiltering() {
 }
 
 async function clearLogs() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     // Replace confirm with custom check if needed, but browser confirm is okay for safety
     if (!confirm("Вы действительно хотите полностью очистить журнал системных логов?")) return;
     try {
@@ -390,6 +408,62 @@ function renderAccounts(accounts) {
     }
 
     updateLogAccountOptions(accounts);
+
+    // Viewer mode: render read-only cards (no actions)
+    if (currentUserRole !== 'admin') {
+        const newHtml = accounts.map(acc => {
+            const isOnline = acc.status.toLowerCase() === 'online';
+            const isNew = !renderedAccountNames.has(acc.name);
+            if (isNew) renderedAccountNames.add(acc.name);
+
+            const statusLabel = isOnline ? 'Online' : 'Offline';
+            const statusClass = isOnline ? 'is-online' : 'is-offline';
+            const safeName = String(acc.name || '').replace(/[&<>"']/g, (m) => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;',
+            }[m]));
+            const jsName = String(acc.name || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+            return `
+            <div class="card account-card ${isNew ? 'card-entrance' : ''}">
+                <div class="account-head">
+                    <div>
+                        <div class="account-name" onclick="focusLogsForAccount('${jsName}')" title="Фильтр логов по аккаунту">${safeName}</div>
+                        <div class="account-status ${statusClass}">
+                            <span class="status-indicator"></span>
+                            <span>${statusLabel}</span>
+                        </div>
+                    </div>
+                    <div class="badge">AI</div>
+                </div>
+
+                <div class="account-stats">
+                    <div class="stat-box">
+                        <span class="stat-label">Файлы</span>
+                        <span class="stat-val">${acc.stats.blocked_files}</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Скам</span>
+                        <span class="stat-val stat-val--danger">${acc.stats.blocked_scams}</span>
+                    </div>
+                    <div class="stat-box stat-box--wide">
+                        <span class="stat-label">Новые контакты</span>
+                        <span class="stat-val stat-val--good">${acc.stats.total_unknown}</span>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+
+        if (newHtml !== lastAccountsHtml) {
+            grid.innerHTML = newHtml;
+            lastAccountsHtml = newHtml;
+            updateIcons();
+        }
+        return;
+    }
 
     const newHtml = accounts.map(acc => {
         const isOnline = acc.status.toLowerCase() === 'online';
@@ -435,7 +509,7 @@ function renderAccounts(accounts) {
                 </div>
             </div>
 
-            <div class="account-actions">
+            <div class="account-actions ${currentUserRole !== 'admin' ? 'is-hidden' : ''}">
                 <button class="btn btn-icon btn-ghost" onclick="openHistory('${jsName}')" title="История" aria-label="История">
                     <i data-lucide="message-square"></i>
                 </button>
@@ -466,6 +540,7 @@ function renderAccounts(accounts) {
 }
 
 async function deleteAccount(name) {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     if (!confirm(`Вы действительно хотите БЕЗВОЗВРАТНО удалить аккаунт ${name}?`)) return;
     try {
         const response = await fetch(`/api/accounts/${name}`, { method: 'DELETE' });
@@ -478,6 +553,7 @@ async function deleteAccount(name) {
 }
 
 async function restartAccount(name, event) {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const btn = event.currentTarget;
     setButtonLoading(btn, true);
 
@@ -498,6 +574,7 @@ async function restartAccount(name, event) {
 }
 
 async function resetAccountData(name) {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     if (!confirm(`Сбросить все статистические данные для ${name}?`)) return;
     try {
         const response = await fetch(`/api/accounts/reset/${name}`, { method: 'POST' });
@@ -532,6 +609,7 @@ function updateSettingsUI() {
 }
 
 async function openSettings(name) {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     currentSettingsAccount = name;
     document.getElementById('settings-title').innerText = `${name} Настройки`;
 
@@ -552,6 +630,7 @@ async function openSettings(name) {
 }
 
 async function saveSettings() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     if (!currentSettingsAccount) return;
 
     const prompt = document.getElementById('settings-prompt').value;
@@ -585,6 +664,7 @@ function closeSettings() {
 
 // --- Authentication Flow ---
 async function startAuth() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const nameInput = document.getElementById('account-name');
     const name = nameInput.value.trim();
     if (!name) return showToast("Введите имя аккаунта", "warning");
@@ -675,6 +755,7 @@ function setAuthCancelVisible(visible) {
 }
 
 async function startPhoneAuth() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const name = document.getElementById('account-name').value.trim();
     const phone = document.getElementById('auth-phone').value.trim();
 
@@ -715,6 +796,7 @@ async function startPhoneAuth() {
 }
 
 async function submitPhoneCode() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const code = document.getElementById('auth-code').value.trim();
     const phone = document.getElementById('auth-phone').value.trim();
 
@@ -793,6 +875,7 @@ function startPolling() {
 }
 
 async function submit2FA() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const password = document.getElementById('tf-password').value;
     const statusDiv = document.getElementById('auth-status');
     statusDiv.innerHTML = "⏳ Проверка пароля...";
@@ -813,6 +896,7 @@ async function submit2FA() {
 }
 
 async function cancelAuth() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     if (authCancelInFlight) return;
 
     const name = currentAuthName || document.getElementById('account-name').value.trim();
@@ -854,6 +938,7 @@ async function cancelAuth() {
 }
 
 function openModal() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     document.getElementById('addModal').style.display = 'flex';
     document.getElementById('auth-status').innerText = "";
 
@@ -918,6 +1003,7 @@ function closeHistory() {
 }
 
 async function openLists(name) {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     currentSettingsAccount = name;
     document.getElementById('list-title').innerText = `Списки: ${name}`;
     document.getElementById('listModal').style.display = 'flex';
@@ -937,6 +1023,7 @@ function closeLists() {
 }
 
 async function saveLists() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const whitelist = document.getElementById('list-whitelist').value.split(',').map(s => s.trim()).filter(s => s);
     const blacklist = document.getElementById('list-blacklist').value.split(',').map(s => s.trim()).filter(s => s);
 
@@ -958,6 +1045,7 @@ async function saveLists() {
 }
 
 async function showSystemd() {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     try {
         const res = await fetch('/api/system/systemd');
         const data = await res.json();
@@ -1003,6 +1091,7 @@ async function fetchMainStatus() {
 }
 
 async function controlMain(action) {
+    if (currentUserRole !== 'admin') return showToast("Недостаточно прав", "warning");
     const btn = event.target.closest('.btn');
     setButtonLoading(btn, true);
 
@@ -1201,6 +1290,7 @@ async function apiFetch(url, options = {}) {
 
 // Single start
 (function init() {
+    fetchMe();
     fetchStatus();
     initLogWebSocket();
     fetchMainStatus();
