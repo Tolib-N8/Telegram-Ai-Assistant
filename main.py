@@ -786,6 +786,21 @@ class AccountManager:
         # Marker used to coordinate between dashboard process and supervisor process.
         return (ACCOUNTS_DIR / name / "auth_in_progress.json")
 
+    def _restart_marker_path(self, name: str) -> Path:
+        # Cross-process restart request marker (created by dashboard, consumed by supervisor).
+        return (ACCOUNTS_DIR / name / "restart_requested.json")
+
+    def _consume_restart_marker(self, name: str) -> bool:
+        """Return True if a restart was requested for this account (and consume the marker)."""
+        try:
+            marker = self._restart_marker_path(name)
+            if marker.exists():
+                marker.unlink()
+                return True
+        except Exception:
+            pass
+        return False
+
     def _write_auth_marker(self, name: str, auth_type: str):
         try:
             marker = self._auth_marker_path(name)
@@ -1068,6 +1083,18 @@ class AccountManager:
 
                 # 2. Запускаем новые аккаунты
                 for name in current_names:
+                    # If the dashboard requested a restart for this account, stop it first (if running).
+                    if self._consume_restart_marker(name) and name in running_tasks:
+                        logger.info(f"🔁 [{name}] Запрошен перезапуск аккаунта.")
+                        try:
+                            running_tasks[name].cancel()
+                            await asyncio.gather(running_tasks[name], return_exceptions=True)
+                        except Exception:
+                            pass
+                        del running_tasks[name]
+                        if name in self.bots:
+                            del self.bots[name]
+
                     if name not in running_tasks:
                         # If the dashboard is currently authenticating this account, the session sqlite file is
                         # very likely to be locked. Skip starting until auth completes (marker removed).

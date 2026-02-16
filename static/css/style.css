@@ -1102,6 +1102,7 @@ canvas {
     display: flex;
     gap: 10px;
     margin-top: auto;
+    flex-wrap: wrap;
 }
 
 /* Empty state */
@@ -1186,6 +1187,73 @@ canvas {
     gap: 12px;
     align-items: center;
     flex-wrap: wrap;
+}
+
+.log-account-select {
+    flex: 0 0 auto;
+    min-width: 170px;
+    max-width: 260px;
+    height: 46px;
+    padding: 10px 14px;
+}
+
+.logs__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: -4px 0 18px 0;
+}
+
+.log-chip {
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.04);
+    padding: 8px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    font-weight: 800;
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.78);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+    user-select: none;
+}
+
+.log-chip:hover {
+    transform: translateY(-1px);
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.log-chip.is-active {
+    background: rgba(var(--primary-rgb), 0.10);
+    border-color: rgba(var(--primary-rgb), 0.35);
+    color: #fff;
+    box-shadow: 0 12px 32px rgba(var(--primary-rgb), 0.10);
+}
+
+.log-chip__count {
+    display: inline-grid;
+    place-items: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    color: rgba(255, 255, 255, 0.70);
+    font-size: 0.72rem;
+    font-weight: 900;
+}
+
+.log-chip--danger {
+    border-color: rgba(255, 77, 77, 0.25);
+}
+
+.log-chip--danger.is-active {
+    background: rgba(255, 77, 77, 0.10);
+    border-color: rgba(255, 77, 77, 0.40);
 }
 
 .toggle-wrapper {

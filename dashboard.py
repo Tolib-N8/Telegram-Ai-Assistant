@@ -658,6 +658,29 @@ async def reset_account(name: str, username: str = Depends(authenticate)):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.post("/api/accounts/restart/{name}")
+async def restart_account(name: str, username: str = Depends(authenticate)):
+    """
+    Request a restart of a single account inside the supervisor (main.py).
+    Implemented via a cross-process marker file consumed by AccountManager.run_all().
+    """
+    config = load_json_file(MANAGER_CONFIG, {"accounts": []})
+    if not any(a.get("name") == name for a in (config.get("accounts") or [])):
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if not find_main_process():
+        return JSONResponse({"status": "error", "message": "Supervisor (main.py) is not running"}, status_code=409)
+
+    acc_dir = ACCOUNTS_DIR / name
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    marker = acc_dir / "restart_requested.json"
+    try:
+        from main import atomic_save_json
+        atomic_save_json(marker, {"ts": time.time(), "requested_by": username, "pid": os.getpid()})
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/api/accounts/history/{name}")
 async def get_account_history(name: str, username: str = Depends(authenticate)):
     acc_dir = ACCOUNTS_DIR / name

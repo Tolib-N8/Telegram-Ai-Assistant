@@ -125,6 +125,10 @@
                     <input type="text" id="log-search" class="input-fancy"
                         placeholder="Поиск по логам: error, warn, имя аккаунта..." oninput="filterLogs()">
                 </div>
+                <select id="log-account" class="input-fancy log-account-select" onchange="setLogAccountFilter(this.value)" aria-label="Фильтр по аккаунту">
+                    <option value="all">Все аккаунты</option>
+                    <option value="system">System</option>
+                </select>
                 <div class="severity-tabs" id="log-severity-filters">
                     <div class="severity-tab active" data-level="all" onclick="setLogFilter('all')">Все</div>
                     <div class="severity-tab" data-level="info" onclick="setLogFilter('info')">Info</div>
@@ -138,6 +142,8 @@
                     </div>
                 </div>
             </div>
+
+            <div class="logs__chips" id="log-chips" aria-label="Быстрые фильтры"></div>
 
             <div class="log-viewer" id="log-viewer">
                 <div class="log-line log-line--empty">Ожидание данных...</div>

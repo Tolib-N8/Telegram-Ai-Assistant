@@ -1,5 +1,6 @@
 // --- Constants & Global State ---
 let currentLogFilter = 'all';
+let currentAccountFilter = 'all';
 let allLogs = [];
 let autoScrollEnabled = true;
 let currentSettingsAccount = null;
@@ -7,6 +8,15 @@ let settingsAiEnabled = true;
 let currentAuthName = null;
 let authCheckInterval = null;
 let authCancelInFlight = false;
+
+let chipsLastRenderAt = 0;
+const LOG_CHIPS = [
+    { key: 'db_locked', label: 'DB locked', query: 'database is locked', kind: 'danger' },
+    { key: 'flood', label: 'FLOOD_WAIT', query: 'FLOOD_WAIT', kind: 'danger' },
+    { key: 'auth_needed', label: 'Auth needed', query: 'не авторизован', kind: 'danger' },
+    { key: '2fa', label: '2FA', query: '2fa', kind: 'info' },
+    { key: 'net', label: 'Network', query: 'Connection', kind: 'info' },
+];
 
 function setButtonLoading(btn, isLoading) {
     if (!btn) return;
@@ -211,8 +221,92 @@ function setLogFilter(level) {
     applyLogFiltering();
 }
 
+function setLogAccountFilter(accountName) {
+    currentAccountFilter = accountName || 'all';
+    applyLogFiltering();
+}
+
+function focusLogsForAccount(name) {
+    const sel = document.getElementById('log-account');
+    if (sel) {
+        sel.value = name;
+        currentAccountFilter = name;
+    }
+    const input = document.getElementById('log-search');
+    if (input) input.value = '';
+    setLogFilter('all');
+    applyLogFiltering();
+    const logs = document.querySelector('.card.logs');
+    if (logs) logs.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function updateLogAccountOptions(accounts) {
+    const sel = document.getElementById('log-account');
+    if (!sel) return;
+
+    const prev = sel.value || currentAccountFilter || 'all';
+    const names = (accounts || []).map(a => a.name).filter(Boolean);
+
+    const options = [
+        { value: 'all', label: 'Все аккаунты' },
+        { value: 'system', label: 'System' },
+        ...names.map(n => ({ value: n, label: n })),
+    ];
+
+    sel.innerHTML = options.map(o => `<option value="${String(o.value).replace(/"/g, '&quot;')}">${String(o.label)}</option>`).join('');
+    // Restore if still valid
+    const valid = options.some(o => o.value === prev);
+    sel.value = valid ? prev : 'all';
+    currentAccountFilter = sel.value;
+}
+
 function filterLogs() {
     applyLogFiltering();
+}
+
+function extractLogSource(line) {
+    const m = String(line || '').match(/- \[([^\]]+)\] -/);
+    return m ? m[1] : '';
+}
+
+function matchesAccountFilter(line) {
+    if (currentAccountFilter === 'all') return true;
+
+    const source = extractLogSource(line);
+    const account = source.startsWith('Bot_') ? source.slice(4) : 'system';
+    if (currentAccountFilter === 'system') return account === 'system';
+    return account === currentAccountFilter;
+}
+
+function renderLogChips() {
+    const container = document.getElementById('log-chips');
+    if (!container) return;
+
+    const now = Date.now();
+    if (now - chipsLastRenderAt < 500) return;
+    chipsLastRenderAt = now;
+
+    const base = allLogs.slice(-800).filter(matchesAccountFilter);
+    const search = (document.getElementById('log-search')?.value || '').trim().toLowerCase();
+
+    const chipsHtml = [];
+    chipsHtml.push(
+        `<div class="log-chip ${search ? 'is-active' : ''}" onclick="(function(){document.getElementById('log-search').value=''; applyLogFiltering();})()">` +
+        `Сброс <span class="log-chip__count">${base.length}</span></div>`
+    );
+
+    for (const c of LOG_CHIPS) {
+        const q = c.query.toLowerCase();
+        const count = base.reduce((acc, l) => acc + (String(l).toLowerCase().includes(q) ? 1 : 0), 0);
+        const active = search && search.includes(q);
+        const kindClass = c.kind === 'danger' ? 'log-chip--danger' : '';
+        chipsHtml.push(
+            `<div class="log-chip ${kindClass} ${active ? 'is-active' : ''}" onclick="(function(){document.getElementById('log-search').value='${c.query.replace(/'/g, "\\'")}'; applyLogFiltering();})()">` +
+            `${c.label} <span class="log-chip__count">${count}</span></div>`
+        );
+    }
+
+    container.innerHTML = chipsHtml.join('');
 }
 
 function applyLogFiltering() {
@@ -222,6 +316,7 @@ function applyLogFiltering() {
     const oldHtml = viewer.innerHTML;
 
     const filtered = allLogs.filter(line => {
+        if (!matchesAccountFilter(line)) return false;
         const matchesSearch = line.toLowerCase().includes(search);
         let matchesLevel = true;
 
@@ -257,6 +352,8 @@ function applyLogFiltering() {
             viewer.scrollTop = viewer.scrollHeight;
         }
     }
+
+    renderLogChips();
 }
 
 async function clearLogs() {
@@ -292,6 +389,8 @@ function renderAccounts(accounts) {
         return;
     }
 
+    updateLogAccountOptions(accounts);
+
     const newHtml = accounts.map(acc => {
         const isOnline = acc.status.toLowerCase() === 'online';
         const isNew = !renderedAccountNames.has(acc.name);
@@ -312,7 +411,7 @@ function renderAccounts(accounts) {
         <div class="card account-card ${isNew ? 'card-entrance' : ''}">
             <div class="account-head">
                 <div>
-                    <div class="account-name">${safeName}</div>
+                    <div class="account-name" onclick="focusLogsForAccount('${jsName}')" title="Фильтр логов по аккаунту">${safeName}</div>
                     <div class="account-status ${statusClass}">
                         <span class="status-indicator"></span>
                         <span>${statusLabel}</span>
@@ -346,6 +445,12 @@ function renderAccounts(accounts) {
                 <button class="btn btn-icon btn-ghost" onclick="openSettings('${jsName}')" title="Настройки" aria-label="Настройки">
                     <i data-lucide="settings"></i>
                 </button>
+                <button class="btn btn-icon btn-ghost" onclick="restartAccount('${jsName}', event)" title="Перезапуск" aria-label="Перезапуск">
+                    <i data-lucide="refresh-cw"></i>
+                </button>
+                <button class="btn btn-icon btn-ghost" onclick="resetAccountData('${jsName}')" title="Сброс данных" aria-label="Сброс данных">
+                    <i data-lucide="rotate-ccw"></i>
+                </button>
                 <button class="btn btn-icon btn-danger" onclick="deleteAccount('${jsName}')" title="Удалить" aria-label="Удалить">
                     <i data-lucide="trash-2"></i>
                 </button>
@@ -374,17 +479,21 @@ async function deleteAccount(name) {
 
 async function restartAccount(name, event) {
     const btn = event.currentTarget;
-    const icon = btn.querySelector('i');
-    icon.classList.add('animate-spin');
+    setButtonLoading(btn, true);
 
     try {
-        await fetch(`/api/accounts/restart/${name}`, { method: 'POST' });
-        showToast(`Аккаунт ${name} перезагружается`, "info");
-        setTimeout(fetchStatus, 2000);
+        const res = await fetch(`/api/accounts/restart/${name}`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (data.status === 'success') {
+            showToast(`Аккаунт ${name} перезагружается`, "info");
+            setTimeout(fetchStatus, 2000);
+        } else {
+            showToast(data.message || "Ошибка перезапуска", "error");
+        }
     } catch (err) {
         showToast("Ошибка перезапуска", "error");
     } finally {
-        setTimeout(() => icon.classList.remove('animate-spin'), 1000);
+        setTimeout(() => setButtonLoading(btn, false), 800);
     }
 }
 
