@@ -182,6 +182,13 @@ Passkeys (WebAuthn), опционально:
 - `EXPECTED_ORIGIN` (например `https://your-domain.example`)
 - `RP_ID` (например `your-domain.example`)
 
+Безопасность/прод:
+- `TRUST_PROXY=1` (если за Cloudflare Tunnel/Reverse proxy, чтобы корректно определять схему и IP)
+- `AUTH_RL_MAX=12`, `AUTH_RL_WINDOW=60` (rate limit на попытки логина/Passkey)
+- `DASHBOARD_SESSION_MAX_AGE=604800` (в секундах, по умолчанию 7 дней)
+- `DASHBOARD_COOKIE_SECURE=1` (форсировать Secure cookie, если прокси не передает https-схему)
+- `ENABLE_CSP=1` (включить Content-Security-Policy, опционально)
+
 ---
 
 ## 🛡️ Безопасность

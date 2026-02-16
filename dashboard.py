@@ -22,6 +22,12 @@ from itsdangerous import URLSafeSerializer
 from fastapi.responses import HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, APIKeyCookie
 import auth_utils
+from collections import deque
+
+try:
+    from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
+except Exception:
+    ProxyHeadersMiddleware = None
 
 # Загружаем переменные окружения в начале
 load_dotenv()
@@ -59,6 +65,122 @@ if ENABLE_METRICS:
     ACCOUNTS_ONLINE = Gauge("tg_assistant_accounts_online", "Accounts online according to heartbeat status.json")
     AUTH_ACTIVE = Gauge("tg_assistant_auth_active", "Active auth flows in dashboard process")
     UPTIME_SECONDS = Gauge("tg_assistant_dashboard_uptime_seconds", "Dashboard process uptime in seconds")
+
+TRUST_PROXY = str(os.getenv("TRUST_PROXY", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+if TRUST_PROXY and ProxyHeadersMiddleware is not None:
+    # Needed when running behind Cloudflare Tunnel / reverse proxies to get proper scheme and client IP.
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
+
+def _get_request_scheme(request: Request) -> str:
+    xf_proto = request.headers.get("x-forwarded-proto")
+    if xf_proto:
+        return xf_proto.split(",")[0].strip().lower()
+    cf_visitor = request.headers.get("cf-visitor")
+    if cf_visitor:
+        try:
+            data = json.loads(cf_visitor)
+            scheme = str(data.get("scheme", "")).lower().strip()
+            if scheme:
+                return scheme
+        except Exception:
+            pass
+    return (request.url.scheme or "http").lower()
+
+
+def _get_client_ip(request: Request) -> str:
+    # Cloudflare Tunnel and many proxies send the real IP in these headers.
+    for h in ("cf-connecting-ip", "x-real-ip", "x-forwarded-for"):
+        v = request.headers.get(h)
+        if not v:
+            continue
+        # X-Forwarded-For may contain a list.
+        return v.split(",")[0].strip()
+    return getattr(getattr(request, "client", None), "host", "") or "unknown"
+
+
+def _is_https(request: Request) -> bool:
+    return _get_request_scheme(request) == "https"
+
+
+def _set_session_cookie(response: Response, username: str, request: Request):
+    token = serializer.dumps({"user": username, "ts": time.time()})
+    max_age = int(os.getenv("DASHBOARD_SESSION_MAX_AGE", str(60 * 60 * 24 * 7)))  # 7 days
+    secure = str(os.getenv("DASHBOARD_COOKIE_SECURE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    secure = secure or _is_https(request)
+    response.set_cookie(
+        key="session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        max_age=max_age,
+        path="/",
+    )
+
+
+class InMemoryRateLimiter:
+    def __init__(self, max_hits: int, window_seconds: int):
+        self.max_hits = max_hits
+        self.window_seconds = window_seconds
+        self._hits = {}  # key -> deque[timestamps]
+
+    def check(self, key: str) -> tuple[bool, int]:
+        now = time.time()
+        q = self._hits.get(key)
+        if q is None:
+            q = deque()
+            self._hits[key] = q
+        while q and q[0] < now - self.window_seconds:
+            q.popleft()
+        if len(q) >= self.max_hits:
+            retry_after = int(max(1, self.window_seconds - (now - q[0])))
+            return False, retry_after
+        q.append(now)
+        return True, 0
+
+
+AUTH_RL = InMemoryRateLimiter(
+    max_hits=int(os.getenv("AUTH_RL_MAX", "12")),
+    window_seconds=int(os.getenv("AUTH_RL_WINDOW", "60")),
+)
+
+
+@app.middleware("http")
+async def _security_headers_mw(request: Request, call_next):
+    response = await call_next(request)
+
+    # Basic hardening headers.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=(), payment=(), usb=()",
+    )
+
+    # Only set HSTS when the request is actually HTTPS (or forced).
+    force_hsts = str(os.getenv("FORCE_HSTS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if force_hsts or _is_https(request):
+        response.headers.setdefault("Strict-Transport-Security", "max-age=15552000; includeSubDomains")
+
+    # Optional CSP (off by default because the dashboard uses inline styles and CDN scripts).
+    enable_csp = str(os.getenv("ENABLE_CSP", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if enable_csp and "Content-Security-Policy" not in response.headers:
+        csp = (
+            "default-src 'self'; "
+            "base-uri 'self'; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
+            "img-src 'self' data:; "
+            "connect-src 'self' ws: wss:; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com data:; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; "
+        )
+        response.headers["Content-Security-Policy"] = csp
+
+    return response
 
 
 @app.middleware("http")
@@ -212,6 +334,15 @@ async def login_page(user: str = Depends(get_session_user)):
 
 @app.post("/api/auth/login")
 async def api_login(req: Request):
+    ip = _get_client_ip(req)
+    ok, retry_after = AUTH_RL.check(f"{ip}:password_login")
+    if not ok:
+        return JSONResponse(
+            {"status": "error", "message": "Too many attempts. Try later."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     data = await req.json()
     username = data.get("username")
     password = data.get("password")
@@ -224,17 +355,16 @@ async def api_login(req: Request):
         logging.warning("DASHBOARD_PASSWORD is not set. Generated a random one for this run.")
     
     if username == correct_username and password == correct_password:
-        token = serializer.dumps({"user": username, "ts": time.time()})
         response = JSONResponse({"status": "success"})
-        response.set_cookie(key="session", value=token, httponly=True, samesite="lax")
+        _set_session_cookie(response, username, req)
         return response
     
     return JSONResponse({"status": "error", "message": "Invalid credentials"}, status_code=401)
 
 @app.post("/api/auth/logout")
-async def api_logout():
+async def api_logout(req: Request):
     response = JSONResponse({"status": "success"})
-    response.delete_cookie("session")
+    response.delete_cookie("session", path="/")
     return response
 
 @app.get("/", response_class=HTMLResponse)
@@ -246,9 +376,18 @@ async def get_dashboard(user: str = Depends(get_session_user)):
 
 @app.get("/api/auth/register/options")
 async def register_options(request: Request, user: str = Depends(authenticate)):
+    ip = _get_client_ip(request)
+    ok, retry_after = AUTH_RL.check(f"{ip}:passkey_register_options")
+    if not ok:
+        return JSONResponse(
+            {"status": "error", "message": "Too many attempts. Try later."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # derive origin and rp_id from the incoming request so origin matches
-    origin = str(request.base_url).rstrip('/')
-    rp_id = request.url.hostname or os.getenv('RP_ID', 'localhost')
+    origin = os.getenv("EXPECTED_ORIGIN") or str(request.base_url).rstrip('/')
+    rp_id = os.getenv("RP_ID") or request.url.hostname or "localhost"
 
     options = auth_utils.get_webauthn_registration_options(user, user, rp_id=rp_id)
     # Convert to JSON-friendly structure and store challenge (string) in memory
@@ -269,6 +408,15 @@ async def register_options(request: Request, user: str = Depends(authenticate)):
 
 @app.post("/api/auth/register/verify")
 async def register_verify(req: Request, user: str = Depends(authenticate)):
+    ip = _get_client_ip(req)
+    ok, retry_after = AUTH_RL.check(f"{ip}:passkey_register_verify")
+    if not ok:
+        return JSONResponse(
+            {"status": "error", "message": "Too many attempts. Try later."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     data = await req.json()
     stored = webauthn_challenges.get(user)
     if not stored:
@@ -281,13 +429,24 @@ async def register_verify(req: Request, user: str = Depends(authenticate)):
 
     success = auth_utils.verify_webauthn_registration(user, data, stored.get('challenge'))
     if success:
+        # One-time use challenge
+        webauthn_challenges.pop(user, None)
         return {"status": "success"}
     return JSONResponse({"status": "error", "message": "Verification failed"}, status_code=400)
 
 @app.post("/api/auth/login/options")
 async def login_options(request: Request):
+    ip = _get_client_ip(request)
+    ok, retry_after = AUTH_RL.check(f"{ip}:passkey_login_options")
+    if not ok:
+        return JSONResponse(
+            {"status": "error", "message": "Too many attempts. Try later."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     data = await request.json()
-    rp_id = request.url.hostname or os.getenv('RP_ID', 'localhost')
+    rp_id = os.getenv("RP_ID") or request.url.hostname or "localhost"
     username = data.get("username") if isinstance(data, dict) else None
 
     if username:
@@ -306,7 +465,7 @@ async def login_options(request: Request):
         except Exception:
             pass
 
-    origin = str(request.base_url).rstrip('/')
+    origin = os.getenv("EXPECTED_ORIGIN") or str(request.base_url).rstrip('/')
     login_id = secrets.token_urlsafe(16)
     webauthn_challenges[f"login_{login_id}"] = {
         'challenge': options_json.get('challenge') if isinstance(options_json, dict) else None,
@@ -320,6 +479,15 @@ async def login_options(request: Request):
 
 @app.post("/api/auth/login/verify")
 async def login_verify(req: Request):
+    ip = _get_client_ip(req)
+    ok, retry_after = AUTH_RL.check(f"{ip}:passkey_login_verify")
+    if not ok:
+        return JSONResponse(
+            {"status": "error", "message": "Too many attempts. Try later."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     data = await req.json()
     username = data.get("username") if isinstance(data, dict) else None
     login_id = data.get("login_id") if isinstance(data, dict) else None
@@ -348,9 +516,8 @@ async def login_verify(req: Request):
     if authed_user:
         # One-time use challenge
         webauthn_challenges.pop(stored_key, None)
-        token = serializer.dumps({"user": authed_user, "ts": time.time()})
         response = JSONResponse({"status": "success"})
-        response.set_cookie(key="session", value=token, httponly=True, samesite="lax")
+        _set_session_cookie(response, authed_user, req)
         return response
 
     return JSONResponse({"status": "error", "message": "Verification failed"}, status_code=401)
