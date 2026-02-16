@@ -159,6 +159,14 @@ sudo journalctl -u cloudflared-dashboard.service -n 50 --no-pager
 
 Также убедитесь, что на сервере реально обновлен код (`git pull`) и перезапущены сервисы dashboard/supervisor.
 
+---
+
+## 🩺 Health / Metrics
+
+- `GET /healthz` всегда отвечает `200` если процесс dashboard жив.
+- `GET /readyz` отвечает `200` когда настроены критичные переменные (`API_ID`, `API_HASH`) и доступна папка `accounts/`.
+- `GET /metrics` (Prometheus) включается переменной `ENABLE_METRICS=1`.
+
 ## 🔐 Переменные окружения (.env)
 
 Обязательные:

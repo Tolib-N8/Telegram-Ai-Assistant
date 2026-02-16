@@ -31,6 +31,126 @@ from main import AccountManager, MANAGER_CONFIG, ACCOUNTS_DIR, load_json_file
 
 app = FastAPI(title="Telegram Assistant Dashboard", version="1.0")
 VERSION = "v1.0"
+APP_STARTED_AT = time.time()
+
+ENABLE_METRICS = str(os.getenv("ENABLE_METRICS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+try:
+    if ENABLE_METRICS:
+        from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    else:
+        Counter = Gauge = Histogram = generate_latest = CONTENT_TYPE_LATEST = None
+except Exception:
+    Counter = Gauge = Histogram = generate_latest = CONTENT_TYPE_LATEST = None
+    ENABLE_METRICS = False
+
+if ENABLE_METRICS:
+    HTTP_REQUESTS = Counter(
+        "tg_assistant_http_requests_total",
+        "Total HTTP requests",
+        ["method", "path", "status"],
+    )
+    HTTP_LATENCY = Histogram(
+        "tg_assistant_http_request_duration_seconds",
+        "HTTP request duration in seconds",
+        ["method", "path"],
+        buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+    )
+    ACCOUNTS_CONFIGURED = Gauge("tg_assistant_accounts_configured", "Accounts configured in manager.json")
+    ACCOUNTS_ONLINE = Gauge("tg_assistant_accounts_online", "Accounts online according to heartbeat status.json")
+    AUTH_ACTIVE = Gauge("tg_assistant_auth_active", "Active auth flows in dashboard process")
+    UPTIME_SECONDS = Gauge("tg_assistant_dashboard_uptime_seconds", "Dashboard process uptime in seconds")
+
+
+@app.middleware("http")
+async def _metrics_middleware(request: Request, call_next):
+    if not ENABLE_METRICS:
+        return await call_next(request)
+
+    t0 = time.time()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        try:
+            route = request.scope.get("route")
+            path = getattr(route, "path", request.url.path)
+            status = str(getattr(response, "status_code", 500))
+            HTTP_REQUESTS.labels(request.method, path, status).inc()
+            HTTP_LATENCY.labels(request.method, path).observe(time.time() - t0)
+        except Exception:
+            pass
+
+
+@app.get("/healthz")
+async def healthz():
+    return {
+        "ok": True,
+        "version": VERSION,
+        "ts": time.time(),
+        "uptime_s": int(time.time() - APP_STARTED_AT),
+    }
+
+
+@app.get("/readyz")
+async def readyz():
+    missing_critical = []
+    missing_optional = []
+
+    api_id = os.getenv("API_ID")
+    api_hash = os.getenv("API_HASH")
+    if not api_id:
+        missing_critical.append("API_ID")
+    if not api_hash:
+        missing_critical.append("API_HASH")
+
+    if not os.getenv("GEMINI_API_KEY"):
+        missing_optional.append("GEMINI_API_KEY")
+
+    accounts_dir_ok = ACCOUNTS_DIR.exists()
+    ok = accounts_dir_ok and not missing_critical
+
+    payload = {
+        "ok": ok,
+        "version": VERSION,
+        "accounts_dir": accounts_dir_ok,
+        "missing_critical": missing_critical,
+        "missing_optional": missing_optional,
+    }
+    return JSONResponse(payload, status_code=200 if ok else 503)
+
+
+@app.get("/metrics")
+async def metrics():
+    if not ENABLE_METRICS or generate_latest is None:
+        raise HTTPException(status_code=404, detail="Metrics disabled")
+
+    # Update gauges on scrape.
+    try:
+        config = load_json_file(MANAGER_CONFIG, {"accounts": []})
+        names = [a.get("name") for a in (config.get("accounts") or []) if a.get("name")]
+        ACCOUNTS_CONFIGURED.set(len(names))
+
+        online = 0
+        for name in names:
+            status_info = load_json_file(ACCOUNTS_DIR / name / "status.json", {"status": "offline", "last_seen": 0})
+            if status_info.get("status") == "online" and (time.time() - (status_info.get("last_seen", 0) or 0)) < 30:
+                online += 1
+        ACCOUNTS_ONLINE.set(online)
+    except Exception:
+        pass
+
+    try:
+        AUTH_ACTIVE.set(len(getattr(manager, "active_auths", {}) or {}))
+    except Exception:
+        pass
+
+    try:
+        UPTIME_SECONDS.set(time.time() - APP_STARTED_AT)
+    except Exception:
+        pass
+
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # Сессии и Безопасность
 SECRET_KEY = os.getenv("DASHBOARD_SECRET", secrets.token_urlsafe(32))

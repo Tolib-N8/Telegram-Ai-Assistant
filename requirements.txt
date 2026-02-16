@@ -10,3 +10,4 @@ webauthn
 itsdangerous
 pydantic
 pillow
+prometheus-client

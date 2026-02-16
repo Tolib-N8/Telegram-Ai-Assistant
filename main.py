@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 import time
 import datetime
 import aiohttp
@@ -25,15 +26,41 @@ except Exception:
 
 # ================= Конфигурация и Константы =================
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+def setup_logging():
+    """
+    Configure logging for the supervisor process.
+    Important: dashboard.py imports main.py, so we must not configure file logging on import.
+    """
+    root = logging.getLogger()
+    if any(getattr(h, "_tg_assistant_handler", False) for h in root.handlers):
+        return
+
+    level_name = str(os.getenv("LOG_LEVEL", "INFO")).upper().strip()
+    level = getattr(logging, level_name, logging.INFO)
+    root.setLevel(level)
+
+    fmt = logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
+
+    log_file = os.getenv("BOT_LOG_FILE", "bot.log")
+    max_mb = int(os.getenv("BOT_LOG_MAX_MB", "20") or 20)
+    backups = int(os.getenv("BOT_LOG_BACKUPS", "5") or 5)
+
+    if max_mb > 0 and backups > 0:
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max_mb * 1024 * 1024,
+            backupCount=backups,
+            encoding="utf-8",
+        )
+    else:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+
+    stream_handler = logging.StreamHandler()
+    for h in (file_handler, stream_handler):
+        h.setFormatter(fmt)
+        h._tg_assistant_handler = True
+        root.addHandler(h)
+
 logger = logging.getLogger("Manager")
 
 # Тексты (резервные)
@@ -49,6 +76,7 @@ BLOCKED_EXTENSIONS = {'.apk', '.exe', '.bat', '.cmd', '.vbs', '.scr', '.js', '.c
 
 ACCOUNTS_DIR = Path("accounts")
 MANAGER_CONFIG = ACCOUNTS_DIR / "manager.json"
+MANAGER_STATUS = ACCOUNTS_DIR / "manager_status.json"
 
 # Prevent starting multiple supervisor instances that would contend on Telethon sqlite sessions.
 SUPERVISOR_LOCK = ACCOUNTS_DIR / ".supervisor.lock"
@@ -1014,6 +1042,21 @@ class AccountManager:
                 # Перезагружаем конфиг, чтобы увидеть новые аккаунты
                 self.config = load_json_file(MANAGER_CONFIG, {"accounts": []})
                 current_names = {acc['name'] for acc in self.config['accounts']}
+
+                # Heartbeat for dashboard/monitoring.
+                try:
+                    atomic_save_json(
+                        MANAGER_STATUS,
+                        {
+                            "status": "running",
+                            "pid": os.getpid(),
+                            "ts": time.time(),
+                            "accounts_configured": len(current_names),
+                            "bots_running": len(running_tasks),
+                        },
+                    )
+                except Exception:
+                    pass
                 
                 # 1. Останавливаем удаленные аккаунты
                 to_stop = set(running_tasks.keys()) - current_names
@@ -1074,6 +1117,18 @@ class AccountManager:
             for t in running_tasks.values():
                 t.cancel()
             await asyncio.gather(*running_tasks.values(), return_exceptions=True)
+            try:
+                atomic_save_json(
+                    MANAGER_STATUS,
+                    {
+                        "status": "stopped",
+                        "pid": os.getpid(),
+                        "ts": time.time(),
+                        "bots_running": 0,
+                    },
+                )
+            except Exception:
+                pass
 
     async def _safe_run(self, bot):
         """Безопасный запуск одного бота с перезапуском при сбоях"""
@@ -1116,6 +1171,7 @@ def parse_arguments():
 
 async def main():
     load_dotenv()
+    setup_logging()
     args = parse_arguments()
     manager = AccountManager()
 
