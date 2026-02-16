@@ -16,6 +16,12 @@ from dotenv import load_dotenv
 import qrcode
 import argparse
 import sys
+import signal
+
+try:
+    import fcntl  # Unix-only, used for a real process lock
+except Exception:
+    fcntl = None
 
 # ================= Конфигурация и Константы =================
 
@@ -43,6 +49,39 @@ BLOCKED_EXTENSIONS = {'.apk', '.exe', '.bat', '.cmd', '.vbs', '.scr', '.js', '.c
 
 ACCOUNTS_DIR = Path("accounts")
 MANAGER_CONFIG = ACCOUNTS_DIR / "manager.json"
+
+# Prevent starting multiple supervisor instances that would contend on Telethon sqlite sessions.
+SUPERVISOR_LOCK = ACCOUNTS_DIR / ".supervisor.lock"
+
+
+def acquire_process_lock(lock_path: Path):
+    """
+    Cross-process lock (best-effort).
+    On Linux, uses fcntl.flock for an actual advisory lock.
+    Fallback: creates the file and keeps it open (not a real lock, but still helpful in most setups).
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_path, "a+", encoding="utf-8")
+    try:
+        f.seek(0)
+        f.truncate(0)
+        f.write(f"pid={os.getpid()}\nstarted_at={int(time.time())}\n")
+        f.flush()
+    except Exception:
+        pass
+
+    if fcntl is None:
+        return f
+
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except BlockingIOError:
+        try:
+            f.close()
+        except Exception:
+            pass
+        raise RuntimeError(f"Another instance is already running (lock: {lock_path}).")
 
 # ================= Утилиты =================
 
@@ -962,7 +1001,7 @@ class AccountManager:
             return {"status": "error", "message": str(e)}
         return {"status": "error", "message": "Unknown error"}
 
-    async def run_all(self):
+    async def run_all(self, stop_event: asyncio.Event | None = None):
         """Бесконечный цикл-супервизор для управления всеми ботами"""
         running_tasks = {} # name: task_object
         
@@ -970,6 +1009,8 @@ class AccountManager:
         
         try:
             while True:
+                if stop_event and stop_event.is_set():
+                    break
                 # Перезагружаем конфиг, чтобы увидеть новые аккаунты
                 self.config = load_json_file(MANAGER_CONFIG, {"accounts": []})
                 current_names = {acc['name'] for acc in self.config['accounts']}
@@ -1017,6 +1058,9 @@ class AccountManager:
                     del running_tasks[n]
                     if n in self.bots: del self.bots[n]
 
+                if stop_event and stop_event.is_set():
+                    break
+
                 if not running_tasks:
                     # Если совсем пусто, просто ждем
                     await asyncio.sleep(5)
@@ -1024,7 +1068,11 @@ class AccountManager:
                     await asyncio.sleep(10) # Проверяем конфиг каждые 10 секунд
                     
         except asyncio.CancelledError:
-            for t in running_tasks.values(): t.cancel()
+            pass
+        finally:
+            # Ensure all running bots are asked to stop.
+            for t in running_tasks.values():
+                t.cancel()
             await asyncio.gather(*running_tasks.values(), return_exceptions=True)
 
     async def _safe_run(self, bot):
@@ -1070,17 +1118,53 @@ async def main():
     load_dotenv()
     args = parse_arguments()
     manager = AccountManager()
+
+    # Ensure single instance to avoid sqlite session locks ("database is locked").
+    try:
+        lock_file = acquire_process_lock(SUPERVISOR_LOCK)
+    except Exception as e:
+        logger.error(str(e))
+        return
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_stop(signame: str):
+        logger.info(f"🛑 Получен сигнал {signame}. Остановка...")
+        stop_event.set()
+
+    for sig, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGINT, "SIGINT")):
+        try:
+            loop.add_signal_handler(sig, _request_stop, name)
+        except (NotImplementedError, RuntimeError):
+            # Windows / some embedded environments
+            try:
+                signal.signal(sig, lambda *_: _request_stop(name))
+            except Exception:
+                pass
     
     # Если запущен в фоне (systemd) или передан флаг --daemon
     if args.daemon or not sys.stdin.isatty():
         logger.info("Запуск в неинтерактивном режиме...")
-        await manager.run_all()
+        try:
+            await manager.run_all(stop_event=stop_event)
+        finally:
+            try:
+                lock_file.close()
+            except Exception:
+                pass
         return
 
     # В main.py больше не будет меню, оно переезжает в control_panel.py
     # Но для обратной совместимости или удобства, если запущен интерактивно без флагов:
     print("Подсказка: Для управления аккаунтами используйте 'python control_panel.py'")
-    await manager.run_all()
+    try:
+        await manager.run_all(stop_event=stop_event)
+    finally:
+        try:
+            lock_file.close()
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     try:
