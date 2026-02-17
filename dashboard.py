@@ -950,13 +950,18 @@ async def get_account_settings(name: str, session: dict = Depends(require_admin)
     default_settings = {
         "gemini_prompt": os.getenv("GEMINI_PROMPT", "Ты личный ассистент..."),
         "ai_enabled": True,
-        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        "owner_name": "",
     }
     
     if settings_file.exists():
         try:
             with open(settings_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                loaded = json.load(f)
+                # Backward compatibility for old settings files.
+                for k, v in default_settings.items():
+                    loaded.setdefault(k, v)
+                return loaded
         except:
             return default_settings
     return default_settings
@@ -968,11 +973,18 @@ async def save_account_settings(name: str, req: Request, session: dict = Depends
         raise HTTPException(status_code=404, detail="Account not found")
     
     data = await req.json()
+    # Store only known keys (avoid accidental garbage in settings.json).
+    allowed = {
+        "gemini_prompt": str(data.get("gemini_prompt", "")),
+        "ai_enabled": bool(data.get("ai_enabled", True)),
+        "gemini_model": str(data.get("gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))),
+        "owner_name": str(data.get("owner_name", "")).strip(),
+    }
     settings_file = acc_dir / "settings.json"
     
     try:
         with open(settings_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+            json.dump(allowed, f, ensure_ascii=False, indent=4)
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}

@@ -620,6 +620,7 @@ async function openSettings(name) {
         document.getElementById('settings-prompt').value = settings.gemini_prompt;
         settingsAiEnabled = settings.ai_enabled;
         document.getElementById('settings-model').value = settings.gemini_model || "gemini-2.5-flash";
+        document.getElementById('settings-owner-name').value = settings.owner_name || "";
         updateSettingsUI();
     } catch (err) {
         showToast("Не удалось загрузить настройки", "error");
@@ -635,10 +636,12 @@ async function saveSettings() {
 
     const prompt = document.getElementById('settings-prompt').value;
     const model = document.getElementById('settings-model').value;
+    const ownerName = document.getElementById('settings-owner-name').value.trim();
     const settings = {
         gemini_prompt: prompt,
         ai_enabled: settingsAiEnabled,
-        gemini_model: model
+        gemini_model: model,
+        owner_name: ownerName
     };
 
     try {

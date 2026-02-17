@@ -258,6 +258,17 @@
             <div style="display:flex; flex-direction:column; gap:32px;">
                 <div>
                     <label
+                        style="display:block; margin-bottom:12px; font-size:0.85rem; font-weight:600; color:var(--text-dim);">Имя
+                        владельца аккаунта</label>
+                    <input id="settings-owner-name" type="text" class="input-fancy"
+                        placeholder="Например: Толибжон">
+                    <div style="margin-top:8px; font-size:0.78rem; color:var(--text-dim); opacity:0.8;">
+                        Бот будет знать как зовут владельца этого аккаунта и не будет использовать «Имя Пользователя».
+                    </div>
+                </div>
+
+                <div>
+                    <label
                         style="display:block; margin-bottom:12px; font-size:0.85rem; font-weight:600; color:var(--text-dim);">Системная
                         личность (Prompt)</label>
                     <textarea id="settings-prompt" class="input-fancy"

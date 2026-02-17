@@ -74,6 +74,15 @@ SECOND_REPLY_TEXT = (
 
 BLOCKED_EXTENSIONS = {'.apk', '.exe', '.bat', '.cmd', '.vbs', '.scr', '.js', '.com', '.msi'}
 
+# Global guardrails for generated replies.
+# These are appended to every AI task to keep behavior consistent even if per-account prompt changes.
+AI_REPLY_RULES = (
+    "Критично: отвечай на том же языке, на котором написал собеседник в MESSAGE/CONVERSATION_HISTORY. "
+    "Не используй шаблонное обращение 'Имя Пользователя' и не выдумывай имя владельца. "
+    "Если имя неизвестно, обращайся нейтрально без имени. "
+    "Пиши коротко, вежливо и по делу."
+)
+
 ACCOUNTS_DIR = Path("accounts")
 MANAGER_CONFIG = ACCOUNTS_DIR / "manager.json"
 MANAGER_STATUS = ACCOUNTS_DIR / "manager_status.json"
@@ -212,6 +221,7 @@ class TelegramAssistant:
         self.gemini_prompt = self.settings.get("gemini_prompt", gemini_prompt)
         self.ai_enabled = self.settings.get("ai_enabled", True)
         self.ai_model = self.settings.get("gemini_model", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+        self.owner_name = str(self.settings.get("owner_name", "") or "").strip()
         
         # Файлы данных
         self.stats_file = self.data_dir / "stats.json"
@@ -351,11 +361,19 @@ class TelegramAssistant:
             history_str = ""
             if user_id:
                 history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
+            owner_context = (
+                f"ACCOUNT_OWNER_NAME: {self.owner_name}\n"
+                if self.owner_name
+                else "ACCOUNT_OWNER_NAME: UNKNOWN (do not invent)\n"
+            )
 
             full_prompt = (
                 f"SYSTEM_INSTRUCTIONS: {self.gemini_prompt}\n"
+                f"GLOBAL_REPLY_RULES: {AI_REPLY_RULES}\n"
+                f"{owner_context}"
                 f"{history_str}"
-                f"CURRENT_TASK: {instruction}\n"
+                f"CURRENT_TASK: {instruction} "
+                f"(обязательно отвечай на языке пользователя)\n"
                 f"MESSAGE: {user_message}\n"
                 f"Respond as defined in SYSTEM_INSTRUCTIONS."
             )
@@ -372,12 +390,21 @@ class TelegramAssistant:
             history_str = ""
             if user_id:
                 history_str = f"CONVERSATION_HISTORY:\n{self.get_history_formatted(user_id)}\n"
+            owner_context = (
+                f"ACCOUNT_OWNER_NAME: {self.owner_name}\n"
+                if self.owner_name
+                else "ACCOUNT_OWNER_NAME: UNKNOWN (do not invent)\n"
+            )
 
             with open(voice_path, 'rb') as f:
                 uploaded_file = await self.ai_client.aio.files.upload(file=f)
             
             full_prompt = [
-                f"SYSTEM_INSTRUCTIONS: {self.gemini_prompt}\n{history_str}TASK: {instruction}",
+                f"SYSTEM_INSTRUCTIONS: {self.gemini_prompt}\n"
+                f"GLOBAL_REPLY_RULES: {AI_REPLY_RULES}\n"
+                f"{owner_context}"
+                f"{history_str}"
+                f"TASK: {instruction} (ответ на языке распознанной речи пользователя)",
                 uploaded_file
             ]
             response = await self.ai_client.aio.models.generate_content(
@@ -553,6 +580,9 @@ class TelegramAssistant:
 
             # Проверяем, включен ли AI в настройках
             self.settings = self.load_settings() # Reload settings to get latest
+            self.gemini_prompt = self.settings.get("gemini_prompt", self.gemini_prompt)
+            self.ai_model = self.settings.get("gemini_model", self.ai_model)
+            self.owner_name = str(self.settings.get("owner_name", self.owner_name) or "").strip()
             if not self.settings.get("ai_enabled", True):
                 # AI выключен, отправляем стандартный ответ
                 final_reply = AUTO_REPLY_TEXT
@@ -561,9 +591,6 @@ class TelegramAssistant:
                 self.user_states[sender.id] = 1
                 self.save_data('states')
                 return # Завершаем обработку, если AI выключен
-
-            # Используем кастомный промпт, если он есть в настройках
-            current_gemini_prompt = self.settings.get("gemini_prompt", self.gemini_prompt)
 
             if state == 0:
                 async with self.client.action(sender.id, 'typing'):
