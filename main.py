@@ -10,8 +10,12 @@ import aiohttp
 from pathlib import Path
 from collections import deque
 from telethon import TelegramClient, events, Button
-from telethon.tl.types import User
+from telethon.tl.types import User, DocumentAttributeFilename
 from telethon.tl.functions.contacts import GetContactsRequest
+from telethon.tl.functions.contacts import BlockRequest, UnblockRequest
+from telethon.tl.functions.account import UpdateNotifySettingsRequest
+from telethon.tl.functions.folders import EditPeerFoldersRequest
+from telethon.tl.types import InputPeerNotifySettings, InputFolderPeer
 from google import genai
 from dotenv import load_dotenv
 import qrcode
@@ -66,13 +70,23 @@ logger = logging.getLogger("Manager")
 # Тексты (резервные)
 AUTO_REPLY_TEXT = (
     "Здравствуйте. Ваш номер не сохранен в моем списке контактов. "
-    "Пожалуйста, укажите причину вашего обращения. Спасибо."
+    "Пожалуйста, представьтесь и кратко напишите, по какому вопросу обращаетесь. Спасибо."
 )
 SECOND_REPLY_TEXT = (
     "Спасибо. Если причина стоящая, я скоро выйду с Вами на связь."
 )
 
 BLOCKED_EXTENSIONS = {'.apk', '.exe', '.bat', '.cmd', '.vbs', '.scr', '.js', '.com', '.msi'}
+BLOCKED_MIME_PREFIXES = (
+    "application/x-dosexec",
+    "application/x-msdownload",
+    "application/x-msdos-program",
+    "application/vnd.android.package-archive",
+    "application/x-msi",
+    "application/x-bat",
+    "application/javascript",
+    "text/javascript",
+)
 
 # Global guardrails for generated replies.
 # These are appended to every AI task to keep behavior consistent even if per-account prompt changes.
@@ -82,6 +96,16 @@ AI_REPLY_RULES = (
     "Если имя неизвестно, обращайся нейтрально без имени. "
     "Пиши коротко, вежливо и по делу."
 )
+
+# Unknown contact dialogue flow states
+STATE_NEW = 0
+STATE_WAITING_DETAILS_BASE = 100      # + warnings_sent (0..3)
+STATE_FINAL_WARNING = 250
+STATE_WAITING_OWNER = 200
+STATE_ARCHIVED_SILENT = 300
+STATE_BLOCKED_FOR_SPAM = 400
+MAX_WARNING_QUESTIONS = 3
+POST_ARCHIVE_SPAM_LIMIT = 1
 
 ACCOUNTS_DIR = Path("accounts")
 MANAGER_CONFIG = ACCOUNTS_DIR / "manager.json"
@@ -494,6 +518,137 @@ class TelegramAssistant:
             return True
 
     # --- Обработчики ---
+    def _extract_file_meta(self, event):
+        """Best-effort filename/mime extraction for file safety checks."""
+        file_obj = getattr(event.message, "file", None)
+        if not file_obj:
+            return "", "", ""
+
+        file_name = (getattr(file_obj, "name", None) or "").strip()
+        mime_type = (getattr(file_obj, "mime_type", None) or "").strip().lower()
+
+        # Some files may not expose name directly; try document attributes.
+        if not file_name:
+            document = getattr(event.message, "document", None)
+            attrs = getattr(document, "attributes", None) or []
+            for attr in attrs:
+                if isinstance(attr, DocumentAttributeFilename):
+                    file_name = (getattr(attr, "file_name", None) or "").strip()
+                    if file_name:
+                        break
+
+        ext = os.path.splitext(file_name.lower())[1] if file_name else ""
+        return file_name, ext, mime_type
+
+    def _is_blocked_file(self, event):
+        file_name, ext, mime_type = self._extract_file_meta(event)
+        if ext and ext in BLOCKED_EXTENSIONS:
+            return True, file_name or f"unknown{ext}", ext, mime_type
+
+        # If extension is hidden/missing, use MIME as fallback.
+        if mime_type and any(mime_type.startswith(p) for p in BLOCKED_MIME_PREFIXES):
+            return True, file_name or "[без имени]", ext, mime_type
+
+        return False, file_name, ext, mime_type
+
+    def _normalize_dialog_state(self, raw_state):
+        """Map legacy states to the new flow while preserving existing users."""
+        try:
+            s = int(raw_state)
+        except Exception:
+            return STATE_NEW
+
+        if s == 0:
+            return STATE_NEW
+        if s == 1:
+            # Legacy: first contact asked -> now equivalent to waiting details with 0 warnings.
+            return STATE_WAITING_DETAILS_BASE
+        if s >= 2 and s < STATE_WAITING_DETAILS_BASE:
+            # Legacy: owner already notified / ongoing dialogue.
+            return STATE_WAITING_OWNER
+        if STATE_WAITING_DETAILS_BASE <= s <= (STATE_WAITING_DETAILS_BASE + MAX_WARNING_QUESTIONS):
+            return s
+        if s in (STATE_WAITING_OWNER, STATE_FINAL_WARNING, STATE_ARCHIVED_SILENT, STATE_BLOCKED_FOR_SPAM):
+            return s
+        if s > STATE_ARCHIVED_SILENT and s < STATE_BLOCKED_FOR_SPAM:
+            return s
+        return STATE_NEW
+
+    def _has_identity_and_purpose(self, text: str) -> bool:
+        """
+        Heuristic: require both identity hint and purpose hint.
+        This avoids accepting generic phrases like 'он мне нужен'.
+        """
+        t = (text or "").strip().lower()
+        if len(t) < 8:
+            return False
+
+        intro_markers = (
+            "меня зовут", "мое имя", "я ", "это ", "i am", "my name", "this is",
+            "меня ", "я из ", "я представляю",
+        )
+        purpose_markers = (
+            "по вопрос", "по поводу", "насчет", "обращаюсь", "пишу", "хочу",
+            "нужно", "мне нужен", "вопрос", "предложени", "request", "regarding",
+            "about", "issue", "question", "matter",
+        )
+
+        has_intro = any(m in t for m in intro_markers)
+        has_purpose = any(m in t for m in purpose_markers)
+        return has_intro and has_purpose
+
+    async def _mute_and_archive_dialog(self, peer):
+        """Silence and archive chat when contact stays non-responsive to screening questions."""
+        try:
+            input_peer = await self.client.get_input_entity(peer)
+        except Exception:
+            input_peer = peer
+
+        # Mute indefinitely (Telegram int32 max timestamp).
+        try:
+            await self.client(
+                UpdateNotifySettingsRequest(
+                    peer=input_peer,
+                    settings=InputPeerNotifySettings(
+                        show_previews=False,
+                        silent=True,
+                        mute_until=2147483647,
+                    ),
+                )
+            )
+        except Exception as e:
+            self.logger.warning(f"Mute dialog failed: {e}")
+
+        # Move to archived folder (folder_id=1).
+        try:
+            await self.client(
+                EditPeerFoldersRequest(
+                    folder_peers=[InputFolderPeer(peer=input_peer, folder_id=1)]
+                )
+            )
+        except Exception as e:
+            self.logger.warning(f"Archive dialog failed: {e}")
+
+    async def _block_user_in_telegram(self, peer):
+        """Hard block user at Telegram level (not only local blacklist)."""
+        try:
+            input_peer = await self.client.get_input_entity(peer)
+            await self.client(BlockRequest(id=input_peer))
+            return True
+        except Exception as e:
+            self.logger.warning(f"Telegram block failed for {peer}: {e}")
+            return False
+
+    async def _unblock_user_in_telegram(self, peer):
+        """Remove Telegram-level block."""
+        try:
+            input_peer = await self.client.get_input_entity(peer)
+            await self.client(UnblockRequest(id=input_peer))
+            return True
+        except Exception as e:
+            self.logger.warning(f"Telegram unblock failed for {peer}: {e}")
+            return False
+
     def register_handlers(self):
         @self.client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
         async def main_handler(event):
@@ -510,12 +665,16 @@ class TelegramAssistant:
 
             # Файлы
             if event.message.file:
-                ext = os.path.splitext((event.message.file.name or "").lower())[1]
-                if ext in BLOCKED_EXTENSIONS:
+                blocked, file_name, ext, mime_type = self._is_blocked_file(event)
+                if blocked:
                     if sender.id not in self.whitelist:
                         await event.delete()
                         self.update_stats("blocked_files")
-                        await self.client.send_message('me', f"🛑 Блок файла `{event.message.file.name}` от {sender.id}. /allow_{sender.id}")
+                        await self.client.send_message(
+                            'me',
+                            f"🛑 Блок файла `{file_name}` от {sender.id}. "
+                            f"(ext: `{ext or 'n/a'}`, mime: `{mime_type or 'n/a'}`) /allow_{sender.id}"
+                        )
                         return
 
             # Текст / Ссылки / Скам
@@ -556,6 +715,7 @@ class TelegramAssistant:
                             await event.delete()
                             self.blacklist.add(sender.id)
                             self.save_data('blacklist')
+                            await self._block_user_in_telegram(sender.id)
                             await self.client.send_message('me', 
                                 f"🛡️ **Агрессивная защита сработала!**\n"
                                 f"👤 От пользователя: `{sender.id}`\n"
@@ -574,8 +734,13 @@ class TelegramAssistant:
             # Добавляем во входящую историю
             self.add_to_history(sender.id, "user", history_text)
 
-            state = self.user_states.get(sender.id, 0)
-            if state == 0:
+            raw_state = self.user_states.get(sender.id, STATE_NEW)
+            state = self._normalize_dialog_state(raw_state)
+            if raw_state != state:
+                self.user_states[sender.id] = state
+                self.save_data('states')
+
+            if state == STATE_NEW:
                 self.update_stats("total_unknown")
 
             # Проверяем, включен ли AI в настройках
@@ -588,14 +753,17 @@ class TelegramAssistant:
                 final_reply = AUTO_REPLY_TEXT
                 await event.reply(final_reply)
                 self.add_to_history(sender.id, "assistant", final_reply)
-                self.user_states[sender.id] = 1
+                self.user_states[sender.id] = STATE_WAITING_DETAILS_BASE
                 self.save_data('states')
                 return # Завершаем обработку, если AI выключен
 
-            if state == 0:
+            if state == STATE_NEW:
                 async with self.client.action(sender.id, 'typing'):
                     await asyncio.sleep(2)
-                instr = "Первый контакт. Спроси кто это и зачем пишет. Будь вежлив."
+                instr = (
+                    "Первый контакт. Обязательно задай вопрос, кто это и по какому вопросу пишет. "
+                    "Коротко и вежливо. Если собеседник уже поздоровался без деталей, попроси представиться и указать цель обращения."
+                )
                 if event.message.voice or event.message.audio:
                     path = await event.message.download_media()
                     reply = await self.get_ai_voice_response(path, instr, user_id=sender.id)
@@ -603,27 +771,112 @@ class TelegramAssistant:
                 else:
                     reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
                 
-                final_reply = reply or AUTO_REPLY_TEXT
+                # Hard fallback: first contact must contain a question and request for purpose.
+                if reply and ("?" in reply or "по какому вопросу" in reply.lower() or "представ" in reply.lower()):
+                    final_reply = reply
+                else:
+                    final_reply = AUTO_REPLY_TEXT
                 await event.reply(final_reply)
                 self.add_to_history(sender.id, "assistant", final_reply)
                 
-                self.user_states[sender.id] = 1
+                # Waiting for structured answer from unknown user.
+                self.user_states[sender.id] = STATE_WAITING_DETAILS_BASE
                 self.save_data('states')
-            
-            elif state == 1:
-                await self.client.send_message('me', f"❗️ Ответ от {sender.id}:\n{history_text}")
-                async with self.client.action(sender.id, 'typing'):
-                    await asyncio.sleep(2)
-                instr = "Пользователь ответил. Поблагодари и скажи что передашь владельцу."
-                reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
-                
-                final_reply = reply or SECOND_REPLY_TEXT
-                await event.reply(final_reply)
-                self.add_to_history(sender.id, "assistant", final_reply)
 
-                self.user_states[sender.id] = 2
-                self.save_data('states')
-            
+            elif STATE_WAITING_DETAILS_BASE <= state <= (STATE_WAITING_DETAILS_BASE + MAX_WARNING_QUESTIONS):
+                warnings_sent = state - STATE_WAITING_DETAILS_BASE
+
+                if self._has_identity_and_purpose(history_text):
+                    await self.client.send_message('me', f"❗️ Ответ от {sender.id}:\n{history_text}")
+                    async with self.client.action(sender.id, 'typing'):
+                        await asyncio.sleep(2)
+                    instr = "Пользователь представился и объяснил вопрос. Поблагодари и скажи что передашь владельцу."
+                    reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
+
+                    final_reply = reply or SECOND_REPLY_TEXT
+                    await event.reply(final_reply)
+                    self.add_to_history(sender.id, "assistant", final_reply)
+
+                    self.user_states[sender.id] = STATE_WAITING_OWNER
+                    self.save_data('states')
+                else:
+                    if warnings_sent < MAX_WARNING_QUESTIONS:
+                        async with self.client.action(sender.id, 'typing'):
+                            await asyncio.sleep(2)
+                        warn_num = warnings_sent + 1
+                        instr = (
+                            f"Пользователь не представился/не указал цель. "
+                            f"Сформулируй {warn_num}-е предупреждение: вежливо, но настойчиво "
+                            "попроси представиться и четко написать вопрос."
+                        )
+                        reply = await self.get_ai_response(history_text, instr, user_id=sender.id)
+                        fallback_warn = (
+                            "Пожалуйста, представьтесь (имя) и четко напишите, по какому вопросу обращаетесь. "
+                            "Без этого я не смогу передать обращение владельцу."
+                        )
+                        final_reply = reply or fallback_warn
+                        await event.reply(final_reply)
+                        self.add_to_history(sender.id, "assistant", final_reply)
+
+                        self.user_states[sender.id] = STATE_WAITING_DETAILS_BASE + warn_num
+                        self.save_data('states')
+                    else:
+                        # Final warning BEFORE archive/mute.
+                        async with self.client.action(sender.id, 'typing'):
+                            await asyncio.sleep(1)
+                        final_warn = (
+                            "Я уже несколько раз попросил представиться и указать цель обращения. "
+                            "Если вы продолжите без этих данных, чат будет переведен в архив и на беззвучный режим. "
+                            "При дальнейшем спаме вы будете заблокированы."
+                        )
+                        await event.reply(final_warn)
+                        self.add_to_history(sender.id, "assistant", final_warn)
+
+                        self.user_states[sender.id] = STATE_FINAL_WARNING
+                        self.save_data('states')
+
+            elif state == STATE_FINAL_WARNING:
+                # One last chance after explicit warning.
+                if self._has_identity_and_purpose(history_text):
+                    await self.client.send_message('me', f"❗️ Ответ от {sender.id} после предупреждения:\n{history_text}")
+                    ack = "Спасибо. Сообщение передано владельцу."
+                    await event.reply(ack)
+                    self.add_to_history(sender.id, "assistant", ack)
+                    self.user_states[sender.id] = STATE_WAITING_OWNER
+                    self.save_data('states')
+                else:
+                    await self.client.send_message(
+                        'me',
+                        f"⚠️ Безрезультатный диалог с {sender.id}: "
+                        "контакт проигнорировал финальное предупреждение. "
+                        "Чат переведен в архив и на беззвучный режим."
+                    )
+                    await self._mute_and_archive_dialog(sender.id)
+                    self.user_states[sender.id] = STATE_ARCHIVED_SILENT
+                    self.save_data('states')
+
+            elif state >= STATE_ARCHIVED_SILENT and state < STATE_BLOCKED_FOR_SPAM:
+                # Contact keeps sending after archive+mute -> treat as spam and blacklist.
+                spam_hits = max(1, state - STATE_ARCHIVED_SILENT + 1)
+                if spam_hits >= POST_ARCHIVE_SPAM_LIMIT:
+                    self.blacklist.add(sender.id)
+                    self.save_data('blacklist')
+                    await self._block_user_in_telegram(sender.id)
+                    self.user_states[sender.id] = STATE_BLOCKED_FOR_SPAM
+                    self.save_data('states')
+                    await self.client.send_message(
+                        'me',
+                        f"🚫 {sender.id} продолжил спам после предупреждения/архива. "
+                        "Пользователь добавлен в черный список."
+                    )
+                else:
+                    self.user_states[sender.id] = STATE_ARCHIVED_SILENT + spam_hits
+                    self.save_data('states')
+                return
+
+            elif state == STATE_BLOCKED_FOR_SPAM:
+                return
+
             else:
                 async with self.client.action(sender.id, 'typing'):
                     await asyncio.sleep(1)
@@ -639,8 +892,11 @@ class TelegramAssistant:
             uid = int(event.pattern_match.group(1))
             self.blacklist.discard(uid)
             self.whitelist.add(uid)
+            self.user_states.pop(uid, None)
             self.save_data('blacklist')
             self.save_data('whitelist')
+            self.save_data('states')
+            await self._unblock_user_in_telegram(uid)
             await event.reply(f"✅ Пользователь `{uid}` разрешен и удален из ЧС.")
 
         @self.client.on(events.NewMessage(pattern=r'/block_(\d+)', from_users='me'))
@@ -648,8 +904,11 @@ class TelegramAssistant:
             uid = int(event.pattern_match.group(1))
             self.whitelist.discard(uid)
             self.blacklist.add(uid)
+            self.user_states[uid] = STATE_BLOCKED_FOR_SPAM
             self.save_data('blacklist')
             self.save_data('whitelist')
+            self.save_data('states')
+            await self._block_user_in_telegram(uid)
             await event.reply(f"🚫 Пользователь `{uid}` в черном списке.")
 
         @self.client.on(events.NewMessage(pattern='/stats', from_users='me'))

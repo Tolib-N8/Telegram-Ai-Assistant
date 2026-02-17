@@ -35,8 +35,8 @@ load_dotenv()
 # Импортируем существующую логику
 from main import AccountManager, MANAGER_CONFIG, ACCOUNTS_DIR, load_json_file
 
-app = FastAPI(title="Telegram Assistant Dashboard", version="1.0")
-VERSION = "v1.0"
+app = FastAPI(title="Telegram Assistant Dashboard", version="1.2")
+VERSION = "v1.2"
 APP_STARTED_AT = time.time()
 
 ENABLE_METRICS = str(os.getenv("ENABLE_METRICS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
