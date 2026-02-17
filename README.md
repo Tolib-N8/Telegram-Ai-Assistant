@@ -20,6 +20,8 @@ cp .env.example .env
 pip install -r requirements.txt
 ```
 
+Then edit `.env` and set your real credentials (at minimum: `API_ID`, `API_HASH`, `GEMINI_API_KEY`, dashboard login/password).
+
 Run in separate terminals:
 
 ```bash
